@@ -1342,73 +1342,14 @@ class ExcelService {
    * @private
    */
   async _undoExecuteCode(details) {
-    try {
-      // Since we don't know exactly what changes were made by the executed code,
-      // we need to provide a generic undo message. Ideally, the execute code
-      // itself would track sub-operations if it intends to be undoable.
-      console.log("Attempting to undo code execution:", details.code);
-      
-      // Best effort: try to identify common operations and revert them
-      // This is very limited and prone to errors.
-      
-      // Look for range references
-      const rangeMatches = details.code.match(/getRange\(["']([^"']+)["']\)/g);
-      const affectedRanges = rangeMatches ? rangeMatches.map(m => m.match(/["']([^"']+)["']/)[1]) : [];
-
-      if (affectedRanges.length > 0) {
-          await Excel.run(async (context) => {
-            const sheet = context.workbook.worksheets.getActiveWorksheet();
-            
-            for (const rangeAddress of affectedRanges) {
-              try {
-                const rangeObj = sheet.getRange(rangeAddress);
-                const format = rangeObj.format;
-                
-                // Simplified reset based on keywords in the original code
-                if (details.code.includes("format.fill.color")) {
-                  format.fill.clear(); // More reliable reset
-                }
-                if (details.code.includes("format.font.color")) {
-                  format.font.color = null; // Reset color
-                }
-                if (details.code.includes("format.font.bold = true")) {
-                  format.font.bold = false;
-                }
-                 if (details.code.includes("format.font.italic = true")) {
-                  format.font.italic = false;
-                }
-                 if (details.code.includes("format.font.underline")) {
-                  format.font.underline = "None";
-                }
-                if (details.code.includes("format.borders")) {
-                  rangeObj.clear(Excel.ClearApplyTo.formats); // Clear all formats as a broader reset
-                }
-                 if (details.code.includes(".values =") || details.code.includes(".formulas =")) {
-                   // Very difficult to undo reliably without previous state
-                   // We might choose *not* to clear contents if unsure
-                   // rangeObj.clear(Excel.ClearApplyTo.contents);
-                   console.warn(`Undo for 'executeCode' cannot reliably restore previous values/formulas for range ${rangeAddress}.`);
-                 }
-                 // Add more specific checks based on common patterns if needed
-                 
-              } catch (rangeError) {
-                 console.error(`Error processing range ${rangeAddress} during undo: ${rangeError}`);
-              }
-            }
-             await context.sync();
-          });
-           return { success: true, message: "Attempted generic undo for code execution. Some formats reset." };
-      }
-
-      // Fallback message if no ranges found or specific actions identified
-      return { 
-        success: true, // Indicate we tried, even if effects are minimal
-        message: "Undo for arbitrary code execution is limited. Changes may need manual review."
-      };
-    } catch (error) {
-      console.error("Error undoing code execution:", error);
-      return { success: false, message: error.message };
-    }
+    console.warn("Attempting to undo 'executeCode'. This is generally not supported.", details);
+    // Reliable undo for arbitrary code execution is not feasible without
+    // knowing the exact inverse operation or storing extensive state,
+    // which isn't done for generic code blocks.
+    return {
+      success: false, // Indicate that the state wasn't actually reverted
+      message: "Undo is not supported for actions generated automatically by the AI assistant. Please manually revert the changes if necessary."
+    };
   }
 
   /**
@@ -2221,130 +2162,130 @@ class ExcelService {
  * Apply formatting only to cells that contain specific text
  * @param {string} range - Range to check (e.g., "A1:D10" or "A:A")
  * @param {string} content - Text content to match
- * @param {object} options - Formatting options (fillColor, fontColor, bold)
+ * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
  * @returns {Promise<object>} - Result with count of formatted cells
  */
 export const formatCellsByContent = async (range, content, options = {}) => {
   let formattedCount = 0;
-  let affectedCells = [];
-  
+  let affectedCellsUndoData = []; // Store previous format data for undo
+
   return new Promise((resolve, reject) => {
     try {
       Excel.run(async (context) => {
-        // Get the range and load its values
         const worksheet = context.workbook.worksheets.getActiveWorksheet();
         const rangeObj = worksheet.getRange(range);
+        // Load only values initially needed to find matches
         rangeObj.load("address, rowCount, columnCount, values");
-        
-        // Load the format properties we'll be changing to capture previous state
-        rangeObj.format.fill.load("color");
-        rangeObj.format.font.load(["color", "bold", "italic", "underline"]);
-        
         await context.sync();
-        
+
         console.log(`Checking range ${rangeObj.address} for cells containing "${content}"`);
-        
-        // Create a matrix to track which cells match
-        const matchMatrix = [];
+
+        // 1. Find matching cell indices without Excel API calls inside loop
+        const matchingCellIndices = [];
         for (let r = 0; r < rangeObj.rowCount; r++) {
-          matchMatrix[r] = [];
           for (let c = 0; c < rangeObj.columnCount; c++) {
-            // Check if the cell value contains the content (case insensitive)
             const cellValue = rangeObj.values[r][c];
-            const isMatch = cellValue !== null && 
-                          cellValue !== undefined && 
+            const isMatch = cellValue !== null &&
+                          cellValue !== undefined &&
                           cellValue.toString().toLowerCase().includes(content.toLowerCase());
-            
-            matchMatrix[r][c] = isMatch;
-            if (isMatch) formattedCount++;
-          }
-        }
-        
-        // Apply formatting only to matching cells
-        for (let r = 0; r < rangeObj.rowCount; r++) {
-          for (let c = 0; c < rangeObj.columnCount; c++) {
-            if (matchMatrix[r][c]) {
-              const cell = rangeObj.getCell(r, c);
-              cell.load("address");
-              cell.format.fill.load("color");
-              cell.format.font.load(["color", "bold", "italic", "underline"]);
-              
-              await context.sync();
-              
-              // Capture ALL current formatting properties before changing anything
-              const previousFormatting = {
-                previousFill: cell.format.fill.color,
-                previousFontColor: cell.format.font.color,
-                previousBold: cell.format.font.bold,
-                previousItalic: cell.format.font.italic,
-                previousUnderline: cell.format.font.underline,
-              };
-              
-              // Store cell address and all previous formatting
-              affectedCells.push({
-                address: cell.address,
-                ...previousFormatting
-              });
-              
-              // Apply fill color if specified
-              if (options.fillColor) {
-                cell.format.fill.color = options.fillColor;
-              }
-              
-              // Apply font color if specified
-              if (options.fontColor) {
-                cell.format.font.color = options.fontColor;
-              }
-              
-              // Apply bold if specified
-              if (options.bold !== undefined) {
-                cell.format.font.bold = options.bold;
-              }
-              
-              // Apply italic if specified
-              if (options.italic !== undefined) {
-                cell.format.font.italic = options.italic;
-              }
-              
-              // Apply underline if specified
-              if (options.underline !== undefined) {
-                cell.format.font.underline = options.underline;
-              }
+            if (isMatch) {
+              matchingCellIndices.push({ r, c });
+              formattedCount++;
             }
           }
         }
-        
-        await context.sync();
-        
-        // Track this operation for undo with complete previous formatting
-        // Ensure excelService instance is available
-        if (excelService) { 
-          excelService._trackOperation("formatCellsByContent", {
-            range: rangeObj.address,
-            content,
-            options,
-            affectedCells
+
+        if (matchingCellIndices.length > 0) {
+          // 2. Create proxy objects and prepare batch load
+          const cellProxies = [];
+          matchingCellIndices.forEach(({ r, c }) => {
+            const cell = rangeObj.getCell(r, c);
+            // 3. Load required properties for all matching cells
+            cell.load("address");
+            // Load specific format properties needed for undo and potential setting
+            cell.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
+            cellProxies.push(cell);
           });
+
+          // 4. Sync once after loading all properties
+          await context.sync();
+
+          // 5. Iterate through loaded proxies, store previous format, apply new format
+          cellProxies.forEach(cell => {
+            // Read loaded properties and store for undo
+             affectedCellsUndoData.push({
+               address: cell.address,
+               previousFill: cell.format.fill.color,
+               previousFontColor: cell.format.font.color,
+               previousBold: cell.format.font.bold,
+               previousItalic: cell.format.font.italic,
+               previousUnderline: cell.format.font.underline,
+             });
+
+            // Apply formatting properties to the proxy object
+            if (options.fillColor) {
+              cell.format.fill.color = options.fillColor;
+            }
+            if (options.fontColor) {
+              cell.format.font.color = options.fontColor;
+            }
+            if (options.bold !== undefined) {
+              cell.format.font.bold = options.bold;
+            }
+            if (options.italic !== undefined) {
+              cell.format.font.italic = options.italic;
+            }
+            // Check for underline property specifically
+            if (options.underline !== undefined) {
+              // Ensure we use the correct Excel Enum if applicable, or a valid string like "None"
+              cell.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
+            }
+          });
+
+           // 6. Sync once at the end to apply all format changes
+          await context.sync();
+
+          // Track operation for undo using the collected data
+          if (excelService) {
+            excelService._trackOperation("formatCellsByContent", {
+              range: rangeObj.address,
+              content,
+              options,
+              affectedCells: affectedCellsUndoData // Use the collected data
+            });
+          }
+        } else {
+           console.log("No matching cells found to format.");
         }
-        
+
         resolve({
           formattedCount,
           success: true,
           message: `Applied formatting to ${formattedCount} cell(s) containing "${content}" in range ${rangeObj.address}`
         });
       }).catch(error => {
-        console.error("Error in formatCellsByContent:", error);
-        reject({
-          success: false,
-          error: error.message || "Error formatting cells",
-          details: error
-        });
+        console.error("Error in formatCellsByContent Excel.run:", error);
+        // Check for the specific property not loaded error
+        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
+           reject({
+             success: false,
+             error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
+             details: error
+           });
+        } else {
+           reject({
+             success: false,
+             error: error.message || "Error formatting cells",
+             details: error
+           });
+        }
       });
     } catch (error) {
-      console.error("Error in formatCellsByContent:", error);
+      // Catch errors thrown before Excel.run starts
+      console.error("Outer Error in formatCellsByContent:", error);
       reject({
         success: false,
-        error: error.message || "Error formatting cells",
+        error: error.message || "Error setting up formatCellsByContent",
         details: error
       });
     }
@@ -2356,159 +2297,165 @@ export const formatCellsByContent = async (range, content, options = {}) => {
  * @param {string} range - Range to check (e.g., "A1:D10" or "A:D")
  * @param {string} columnRef - Column to check for the condition (e.g., "B" or index like "2")
  * @param {string} condition - Text content to match or special keyword like "empty", "missing", "blank"
- * @param {object} options - Formatting options (fillColor, fontColor, bold)
+ * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
  * @returns {Promise<object>} - Result with count of formatted rows
  */
 export const formatRowsByCondition = async (range, columnRef, condition, options = {}) => {
   let formattedCount = 0;
-  let affectedCells = [];
-  
+  let affectedRowsUndoData = []; // Store previous format data for undo
+
   return new Promise((resolve, reject) => {
     try {
       Excel.run(async (context) => {
-        // Get the range and load its values
         const worksheet = context.workbook.worksheets.getActiveWorksheet();
         const rangeObj = worksheet.getRange(range);
+        // Load values initially needed to find matches
         rangeObj.load("address, rowCount, columnCount, values");
-        
         await context.sync();
-        
-        console.log(`Checking range ${rangeObj.address} for rows where column ${columnRef} contains "${condition}"`);
-        
+
+        console.log(`Checking range ${rangeObj.address} for rows where column ${columnRef} satisfies condition "${condition}"`);
+
         // Determine which column index to check
         let columnIndex;
-        if (/^\d+$/.test(columnRef)) {
-          // If columnRef is a number, use it as zero-based index
-          columnIndex = parseInt(columnRef, 10) - 1; // Convert to 0-based index
+        if (/^\\d+$/.test(columnRef)) {
+          columnIndex = parseInt(columnRef, 10) - 1; // Convert 1-based user input to 0-based index
         } else {
-          // If columnRef is a letter, convert to index
-          columnIndex = columnRef.toUpperCase().charCodeAt(0) - 65; // A=0, B=1, etc.
+          // Attempt to convert column letter to 0-based index
+          try {
+            const tempRange = worksheet.getRange(`${columnRef}1`);
+            tempRange.load("columnIndex");
+            await context.sync();
+            columnIndex = tempRange.columnIndex;
+          } catch (e) {
+             throw new Error(`Invalid column reference: ${columnRef}`);
+          }
         }
-        
-        // Validate column index
-        if (columnIndex < 0 || columnIndex >= rangeObj.columnCount) {
-          throw new Error(`Column index ${columnIndex} is out of range (columns: 0-${rangeObj.columnCount-1})`);
+
+        // Validate column index relative to the provided range
+        const rangeStartColIndex = worksheet.getRange(range).getColumnsBefore(columnIndex).getCount();
+        await context.sync();
+        if (rangeStartColIndex < 0 || rangeStartColIndex >= rangeObj.columnCount) {
+             throw new Error(`Column index derived from ${columnRef} is outside the specified range ${rangeObj.address}`);
         }
-        
-        // Check if we're looking for empty/missing values
+        const relativeColumnIndex = rangeStartColIndex; // Use the 0-based index relative to the range start
+
         const isEmptyCheck = ["empty", "missing", "blank", "null", "undefined"].includes(
           condition.toLowerCase().trim()
         );
-        
-        // Create an array to track which rows match
-        const matchRows = [];
+
+        // 1. Find matching row indices without Excel API calls inside loop
+        const matchingRowIndices = []; // Store 0-based row index within the range
         for (let r = 0; r < rangeObj.rowCount; r++) {
-          // Get the cell value in the specified column
-          const cellValue = rangeObj.values[r][columnIndex];
+          const cellValue = rangeObj.values[r][relativeColumnIndex]; // Use relative index
           let isMatch = false;
-          
+
           if (isEmptyCheck) {
-            // Check for empty/missing values
-            isMatch = cellValue === null || 
-                     cellValue === undefined || 
-                     cellValue === "" || 
-                     cellValue.toString().trim() === "";
+            isMatch = cellValue === null ||
+                     cellValue === undefined ||
+                     String(cellValue).trim() === ""; // Check trimmed string value too
           } else {
-            // Check if the cell value contains the condition (case insensitive)
-            isMatch = cellValue !== null && 
-                     cellValue !== undefined && 
-                     cellValue.toString().toLowerCase().includes(condition.toLowerCase());
+            isMatch = cellValue !== null &&
+                     cellValue !== undefined &&
+                     String(cellValue).toLowerCase().includes(condition.toLowerCase());
           }
-          
+
           if (isMatch) {
-            matchRows.push(r);
+            matchingRowIndices.push(r);
             formattedCount++;
           }
         }
-        
-        // Apply formatting to entire rows for matching cells
-        for (let rowIndex of matchRows) {
-          // Get the entire row within the range
-          const rowRange = rangeObj.getRow(rowIndex);
-          rowRange.load("address");
-          rowRange.format.fill.load("color");
-          rowRange.format.font.load(["color", "bold", "italic", "underline"]);
-          
+
+        if (matchingRowIndices.length > 0) {
+          // 2. Create proxy objects and prepare batch load for entire rows
+          const rowProxies = [];
+          matchingRowIndices.forEach(rowIndex => {
+            // Get the entire row object corresponding to the match within the original range
+            const rowRange = rangeObj.getRow(rowIndex);
+            // 3. Load required properties for all matching rows
+            rowRange.load("address");
+            rowRange.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
+            rowProxies.push(rowRange);
+          });
+
+          // 4. Sync once after loading all properties
           await context.sync();
-          
-          // Capture ALL current formatting properties before changing anything
-          const previousFormatting = {
-            previousFill: rowRange.format.fill.color,
-            previousFontColor: rowRange.format.font.color,
-            previousBold: rowRange.format.font.bold,
-            previousItalic: rowRange.format.font.italic,
-            previousUnderline: rowRange.format.font.underline
-          };
-          
-          // Store row address and all previous formatting
-          affectedCells.push({
-            address: rowRange.address,
-            ...previousFormatting
+
+          // 5. Iterate through loaded proxies, store previous format, apply new format
+          rowProxies.forEach(rowRange => {
+             // Read loaded properties and store for undo
+             affectedRowsUndoData.push({
+               address: rowRange.address,
+               previousFill: rowRange.format.fill.color,
+               previousFontColor: rowRange.format.font.color,
+               previousBold: rowRange.format.font.bold,
+               previousItalic: rowRange.format.font.italic,
+               previousUnderline: rowRange.format.font.underline,
+             });
+
+            // Apply formatting properties to the proxy object
+            if (options.fillColor) {
+              rowRange.format.fill.color = options.fillColor;
+            }
+            if (options.fontColor) {
+              rowRange.format.font.color = options.fontColor;
+            }
+            if (options.bold !== undefined) {
+              rowRange.format.font.bold = options.bold;
+            }
+            if (options.italic !== undefined) {
+              rowRange.format.font.italic = options.italic;
+            }
+            if (options.underline !== undefined) {
+               rowRange.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
+            }
           });
-          
-          // Apply fill color if specified
-          if (options.fillColor) {
-            rowRange.format.fill.color = options.fillColor;
+
+          // 6. Sync once at the end to apply all format changes
+          await context.sync();
+
+          // Track operation for undo using the collected data
+          if (excelService) {
+            excelService._trackOperation("formatRowsByCondition", {
+              range: rangeObj.address,
+              columnRef,
+              condition,
+              options,
+              affectedCells: affectedRowsUndoData // Use the collected data (renamed variable for consistency)
+            });
           }
-          
-          // Apply font color if specified
-          if (options.fontColor) {
-            rowRange.format.font.color = options.fontColor;
-          }
-          
-          // Apply bold if specified
-          if (options.bold !== undefined) {
-            rowRange.format.font.bold = options.bold;
-          }
-          
-          // Apply italic if specified
-          if (options.italic !== undefined) {
-            rowRange.format.font.italic = options.italic;
-          }
-          
-          // Apply underline if specified
-          if (options.underline !== undefined) {
-            rowRange.format.font.underline = options.underline;
-          }
+        } else {
+           console.log("No matching rows found to format.");
         }
-        
-        await context.sync();
-        
-        // Track this operation for undo with full previous formatting details
-        // Ensure excelService instance is available
-        if (excelService) {
-          excelService._trackOperation("formatRowsByCondition", {
-            range: rangeObj.address,
-            columnRef,
-            condition,
-            options,
-            affectedCells
-          });
-        }
-        
-        // Prepare a user-friendly message based on the condition type
-        let conditionDescription = isEmptyCheck ? 
-          "missing or empty" : 
+
+        let conditionDescription = isEmptyCheck ?
+          "missing or empty" :
           `containing "${condition}"`;
-        
         resolve({
           formattedCount,
           success: true,
           message: `Applied formatting to ${formattedCount} row(s) where column ${columnRef} is ${conditionDescription} in range ${rangeObj.address}`
         });
       }).catch(error => {
-        console.error("Error in formatRowsByCondition:", error);
-        reject({
-          success: false,
-          error: error.message || "Error formatting rows",
-          details: error
-        });
+        console.error("Error in formatRowsByCondition Excel.run:", error);
+        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
+             reject({
+               success: false,
+               error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
+               details: error
+             });
+        } else {
+             reject({
+               success: false,
+               error: error.message || "Error formatting rows by condition",
+               details: error
+             });
+        }
       });
     } catch (error) {
-      console.error("Error in formatRowsByCondition:", error);
+      console.error("Outer Error in formatRowsByCondition:", error);
       reject({
         success: false,
-        error: error.message || "Error formatting rows",
+        error: error.message || "Error setting up formatRowsByCondition",
         details: error
       });
     }
@@ -2520,130 +2467,152 @@ export const formatRowsByCondition = async (range, columnRef, condition, options
  * @param {string} range - Range to check (e.g., "A1:D10" or "A:D")
  * @param {string} columnRef - Column to check for the condition (e.g., "B" or index like "2")
  * @param {string} exactValue - Exact value to match (case insensitive)
- * @param {object} options - Formatting options (fillColor, fontColor, bold)
+ * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
  * @returns {Promise<object>} - Result with count of formatted rows
  */
 export const formatRowsByExactMatch = async (range, columnRef, exactValue, options = {}) => {
   let formattedCount = 0;
-  let affectedCells = [];
-  
+  let affectedRowsUndoData = []; // Store previous format data for undo
+
   return new Promise((resolve, reject) => {
     try {
       Excel.run(async (context) => {
-        // Get the range and load its values
         const worksheet = context.workbook.worksheets.getActiveWorksheet();
         const rangeObj = worksheet.getRange(range);
+        // Load values initially needed to find matches
         rangeObj.load("address, rowCount, columnCount, values");
-        
         await context.sync();
-        
+
         console.log(`Checking range ${rangeObj.address} for rows where column ${columnRef} equals "${exactValue}"`);
-        
-        // Determine which column index to check
-        let columnIndex;
-        if (/^\d+$/.test(columnRef)) {
-          // If columnRef is a number, use it as zero-based index
-          columnIndex = parseInt(columnRef, 10) - 1; // Convert to 0-based index
-        } else {
-          // If columnRef is a letter, convert to index
-          columnIndex = columnRef.toUpperCase().charCodeAt(0) - 65; // A=0, B=1, etc.
-        }
-        
-        // Validate column index
-        if (columnIndex < 0 || columnIndex >= rangeObj.columnCount) {
-          throw new Error(`Column index ${columnIndex} is out of range (columns: 0-${rangeObj.columnCount-1})`);
-        }
-        
-        // Create an array to track which rows match
-        const matchRows = [];
+
+        // Determine which column index to check (relative to the start of the range)
+        let relativeColumnIndex;
+         try {
+            const fullColRange = worksheet.getRange(`${columnRef}1`);
+            fullColRange.load("columnIndex");
+            await context.sync();
+            const absoluteColIndex = fullColRange.columnIndex;
+
+            const rangeStartColRange = rangeObj.getColumn(0);
+            rangeStartColRange.load("columnIndex");
+            await context.sync();
+            const rangeStartColIndex = rangeStartColRange.columnIndex;
+
+            relativeColumnIndex = absoluteColIndex - rangeStartColIndex;
+
+            if (relativeColumnIndex < 0 || relativeColumnIndex >= rangeObj.columnCount) {
+                 throw new Error(`Column ${columnRef} is outside the specified range ${rangeObj.address}`);
+            }
+         } catch (e) {
+             throw new Error(`Invalid column reference or range setup: ${columnRef}. ${e.message}`);
+         }
+
+        // 1. Find matching row indices without Excel API calls inside loop
+        const matchingRowIndices = []; // Store 0-based row index within the range
+        const lowerCaseExactValue = String(exactValue).toLowerCase(); // Prepare for comparison
+
         for (let r = 0; r < rangeObj.rowCount; r++) {
-          // Get the cell value in the specified column
-          const cellValue = rangeObj.values[r][columnIndex];
-          
+          const cellValue = rangeObj.values[r][relativeColumnIndex];
           // Check for exact match (case insensitive)
-          const isMatch = cellValue !== null && 
-                       cellValue !== undefined && 
-                       cellValue.toString().toLowerCase() === exactValue.toLowerCase();
-          
+          const isMatch = cellValue !== null &&
+                       cellValue !== undefined &&
+                       String(cellValue).toLowerCase() === lowerCaseExactValue;
+
           if (isMatch) {
-            matchRows.push(r);
+            matchingRowIndices.push(r);
             formattedCount++;
           }
         }
-        
-        // Apply formatting to entire rows for matching cells
-        for (let rowIndex of matchRows) {
-          // Get the entire row within the range
-          const rowRange = rangeObj.getRow(rowIndex);
-          rowRange.load("address");
-          rowRange.format.fill.load("color");
-          rowRange.format.font.load(["color", "bold"]);
-          
+
+        if (matchingRowIndices.length > 0) {
+          // 2. Create proxy objects and prepare batch load for entire rows
+          const rowProxies = [];
+          matchingRowIndices.forEach(rowIndex => {
+            const rowRange = rangeObj.getRow(rowIndex);
+            // 3. Load required properties for all matching rows
+            rowRange.load("address");
+            rowRange.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
+            rowProxies.push(rowRange);
+          });
+
+          // 4. Sync once after loading all properties
           await context.sync();
-          
-          // Store previous formatting for undo
-          const rowAddress = rowRange.address;
-          const previousFormatting = {
-            previousFill: rowRange.format.fill.color,
-            previousFontColor: rowRange.format.font.color,
-            previousBold: rowRange.format.font.bold
-          };
-          
-          affectedCells.push({
-            address: rowAddress,
-            ...previousFormatting
+
+          // 5. Iterate through loaded proxies, store previous format, apply new format
+          rowProxies.forEach(rowRange => {
+             // Read loaded properties and store for undo
+             affectedRowsUndoData.push({
+               address: rowRange.address,
+               previousFill: rowRange.format.fill.color,
+               previousFontColor: rowRange.format.font.color,
+               previousBold: rowRange.format.font.bold,
+               previousItalic: rowRange.format.font.italic,
+               previousUnderline: rowRange.format.font.underline,
+             });
+
+            // Apply formatting properties to the proxy object
+            if (options.fillColor) {
+              rowRange.format.fill.color = options.fillColor;
+            }
+            if (options.fontColor) {
+              rowRange.format.font.color = options.fontColor;
+            }
+            if (options.bold !== undefined) {
+              rowRange.format.font.bold = options.bold;
+            }
+             if (options.italic !== undefined) {
+              rowRange.format.font.italic = options.italic;
+            }
+             if (options.underline !== undefined) {
+               rowRange.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
+            }
           });
-          
-          // Apply fill color if specified
-          if (options.fillColor) {
-            rowRange.format.fill.color = options.fillColor;
+
+          // 6. Sync once at the end to apply all format changes
+          await context.sync();
+
+          // Track operation for undo using the collected data
+          if (excelService) {
+            excelService._trackOperation("formatRowsByExactMatch", {
+              range: rangeObj.address,
+              columnRef,
+              exactValue,
+              options,
+              affectedCells: affectedRowsUndoData // Use the collected data (renamed variable)
+            });
           }
-          
-          // Apply font color if specified
-          if (options.fontColor) {
-            rowRange.format.font.color = options.fontColor;
-          }
-          
-          // Apply bold if specified
-          if (options.bold) {
-            rowRange.format.font.bold = options.bold;
-          }
+        } else {
+           console.log("No matching rows found to format.");
         }
-        
-        await context.sync();
-        
-        // Track this operation for undo
-        // Ensure excelService instance is available
-        if (excelService) {
-          excelService._trackOperation("formatRowsByExactMatch", {
-            range: rangeObj.address,
-            columnRef,
-            exactValue,
-            options,
-            affectedCells
-          });
-        }
-        
+
         resolve({
           formattedCount,
           success: true,
           message: `Applied formatting to ${formattedCount} row(s) where column ${columnRef} exactly matches "${exactValue}" in range ${rangeObj.address}`
         });
       }).catch(error => {
-        console.error("Error in formatRowsByExactMatch:", error);
-        reject({
-          success: false,
-          error: error.message || "Error formatting rows",
-          details: error
-        });
+        console.error("Error in formatRowsByExactMatch Excel.run:", error);
+        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
+             reject({
+               success: false,
+               error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
+               details: error
+             });
+        } else {
+             reject({
+               success: false,
+               error: error.message || "Error formatting rows by exact match",
+               details: error
+             });
+        }
       });
     } catch (error) {
-      console.error("Error in formatRowsByExactMatch:", error);
-      reject({
-        success: false,
-        error: error.message || "Error formatting rows",
-        details: error
-      });
+       console.error("Outer Error in formatRowsByExactMatch:", error);
+       reject({
+         success: false,
+         error: error.message || "Error setting up formatRowsByExactMatch",
+         details: error
+       });
     }
   });
 };

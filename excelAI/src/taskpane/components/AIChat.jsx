@@ -491,18 +491,63 @@ const AIChat = () => {
         
         // Check if the cell is still valid in the current sheet
         try {
-          const rangeInfo = await excelService.getData(mostRecentCell);
+          // Request formulas specifically when checking historical cell validity
+          const rangeInfo = await excelService.getData(mostRecentCell); // Assuming getData returns values/formulas if available
           if (rangeInfo && rangeInfo.values) {
             selectedRange = {
               address: mostRecentCell,
               values: rangeInfo.values,
               rowCount: rangeInfo.values.length,
-              columnCount: rangeInfo.values[0].length
+              columnCount: rangeInfo.values[0].length,
+              formulas: rangeInfo.formulas // Add formulas if returned by getData
             };
             noSelectionDetected = false;
           }
         } catch (error) {
-          console.log(`Historical cell ${mostRecentCell} is no longer valid:`, error);
+          console.error("Error getting worksheet data:", error);
+        }
+      }
+      
+      // **Check for Formula Update Request**
+      const isFormulaUpdateRequest = 
+        (/update formula|modify formula|add condition to formula|change formula/i.test(effectiveInput)) &&
+        (extractedCellRef || selectedRange);
+        
+      let existingFormulaInfo = null;
+      if (isFormulaUpdateRequest) {
+        const targetRangeAddress = extractedCellRef || selectedRange?.address;
+        if (targetRangeAddress) {
+          try {
+            console.log(`Detected formula update request for range: ${targetRangeAddress}. Fetching existing formula.`);
+            // Fetch the range info, specifically asking for formulas
+            const rangeData = await Excel.run(async (context) => {
+              const sheet = context.workbook.worksheets.getActiveWorksheet();
+              const range = sheet.getRange(targetRangeAddress);
+              range.load("formulas, rowCount, columnCount");
+              await context.sync();
+              return { 
+                formulas: range.formulas,
+                rowCount: range.rowCount,
+                columnCount: range.columnCount
+              };
+            });
+
+            if (rangeData && rangeData.formulas) {
+              // Format the existing formula info for the prompt
+              // Handle single vs multiple cells
+              if (rangeData.rowCount === 1 && rangeData.columnCount === 1) {
+                existingFormulaInfo = `Existing formula in ${targetRangeAddress}: ${rangeData.formulas[0][0]}`;
+              } else {
+                // For multi-cell ranges, maybe just provide the top-left cell formula or a summary
+                existingFormulaInfo = `Existing formula in top-left cell (${targetRangeAddress}): ${rangeData.formulas[0][0]}. Note: applies to a range.`; 
+                // Or potentially: JSON.stringify(rangeData.formulas)
+              }
+              console.log("Fetched existing formula info:", existingFormulaInfo);
+            }
+          } catch (formulaError) {
+            console.error(`Error fetching existing formula for ${targetRangeAddress}:`, formulaError);
+            existingFormulaInfo = `Could not fetch existing formula for ${targetRangeAddress}.`;
+          }
         }
       }
       
@@ -732,9 +777,20 @@ Remember to be confident and direct in your response - users want clear, actiona
       // Add information about the current mode to the prompt
       userPrompt += `\n\nCurrent AI Mode: ${aiMode}`;
       
-      // Add information about conversation context
-      if (conversationContext.lastMentionedRange && !isCellRangeOnly) {
+      // Check for follow-up actions without explicit range
+      const isFollowUpAction = /^(apply|set|make|color|format|bold|italic|underline)/i.test(effectiveInput.trim()) && !extractedCellRef;
+      const lastKnownRange = conversationHistory.recentCells.length > 0 ? conversationHistory.recentCells[0] : null;
+
+      if (aiMode === "AGENT" && isFollowUpAction && lastKnownRange) {
+        userPrompt += `\n\nIMPORTANT: This looks like a follow-up command. Apply the requested action to the last mentioned range: ${lastKnownRange}`;
+        console.log(`Detected follow-up action, adding context for AI to use last range: ${lastKnownRange}`);
+      } else if (conversationContext.lastMentionedRange && !isCellRangeOnly) {
         userPrompt += `\n\nPreviously mentioned cell range: ${conversationContext.lastMentionedRange}`;
+      }
+      
+      // **Add existing formula info to prompt if fetched**
+      if (existingFormulaInfo) {
+        userPrompt += `\n\n${existingFormulaInfo}`;
       }
       
       // Add the detected used range to the prompt context if it was used
