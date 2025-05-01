@@ -6,107 +6,420 @@ class OpenAIService {
       apiKey: apiKey,
       dangerouslyAllowBrowser: true // For client-side usage
     });
+    this.apiEndpoint = 'https://api.openai.com/v1/chat/completions';
+    this.defaultModel = 'gpt-4-turbo';
   }
 
-  async generateText(prompt, model = 'gpt-3.5-turbo') {
+  /**
+   * Set or update the API key
+   * @param {string} newKey - The new OpenAI API key
+   */
+  setApiKey(newKey) {
+    if (!newKey) {
+      throw new Error('API key is required');
+    }
+    
+    // Update the API key in the OpenAI instance
+    this.openai = new OpenAI({
+      apiKey: newKey,
+      dangerouslyAllowBrowser: true
+    });
+    
+    console.log('OpenAI API key updated successfully');
+  }
+
+  /**
+   * Generate text with enhanced context handling
+   * @param {Object|string} promptData - Either a string prompt or an object containing prompt and context
+   * @param {string} model - The model to use
+   * @returns {Promise<string>} The generated text
+   */
+  async generateText(promptData, model = 'gpt-3.5-turbo') {
     try {
-      const response = await this.openai.chat.completions.create({
-        model: model,
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert Excel automation assistant acting as an agent.\\n\\nYour goal is to fulfill the user\\'s request by either providing information OR generating executable Office.js code to modify the spreadsheet.\\n\\n**Decision Logic:**\\n1.  **Information/Analysis Request?** If the user asks a question requiring reading or analyzing data (e.g., \"how many...\", \"what is the total...\", \"summarize data...\", \"list sheet names\", \"calculate average/sum/count/stats\", \"get context\"), provide the answer DIRECTLY in the chat as natural language. Briefly explain how you found the answer. **DO NOT generate code for these types of requests.** Use the results provided by the system if a calculation was already performed.\\n2.  **Action Request?** If the user asks for ANY action that modifies the spreadsheet (formatting, coloring, creating tables/charts/pivots, inserting/deleting data/rows/columns, creating/renaming/deleting sheets, sorting, filtering, hiding/unhiding, clearing, merging/unmerging, adding comments/hyperlinks, protecting/unprotecting), you MUST **ONLY** output the necessary Office.js JavaScript code to perform that specific action.\\n\\n**IMPORTANT - Handling Formula Updates:**\\n-   If the user asks to \"update\", \"modify\", or \"add a condition to\" a formula in a specific cell/range:\\n    1.  **Check the prompt context:** Look for \"Existing formula in [Cell]: [formula text]\" provided by the system.\\n    2.  **If existing formula exists:** Construct a NEW formula that *combines* the original logic with the user\\'s requested change (e.g., wrap the original formula in an IF statement like \\\`=IF(K2=\\\"Delivered\\\", [Original Formula], \\\"\\\")\\\`).\\n    3.  **If no existing formula mentioned:** Proceed with generating the code for the new formula as requested.\\n    4.  Generate the Office.js code using \\\`range.formulas = [[newCombinedFormula]];\\\`, embedding the logic correctly.\\n-   **DO NOT** simply replace the formula if the request implies modification of an existing one.\\n\\n**Code Generation Rules (Action Requests Only):**\\n-   **ALWAYS generate Office.js code** in a \\\`\\\`\\\`js code block.\\n-   The code block MUST be the **ONLY content** in your response. **CRITICAL:** NEVER add introductory text, explanations, questions, or ANY text outside the code block. Your entire response must start with \\\`\\\`\\\`js and end with \\\`\\\`\\\`. This code will be executed directly.\\n-   The code MUST follow EXACTLY this promise-based pattern for ALL Excel operations:\\n\\n\\\`\\\`\\\`js\\n// Example: Set fill color\\nExcel.run(function(context) {\\n    const sheet = context.workbook.worksheets.getActiveWorksheet();\\n    const range = sheet.getRange(\"A1:B2\"); \\n    range.format.fill.color = \"#FFFF00\"; // Yellow\\n    \\n    return context.sync()\\n      .then(function() {\\n        // Specific success message example below\\n        console.log('Colored range A1:B2 yellow successfully.'); \\n      })\\n      .catch(function(error) {\\n        console.log('Error coloring range A1:B2: ' + error); // Specific error message\\n      });\\n});\\n\\\`\\\`\\\`\\n\\n-   **ABSOLUTELY CRITICAL:** ALWAYS use the promise pattern \\\`return context.sync().then(function() { ... }).catch(function(error) { ... })\\\` for sequencing and error handling within \\\`Excel.run\\\`. **NEVER, EVER** use \\\`await context.sync()\\\" or the \\\`async function(context) { ... }\\\` pattern inside \\\`Excel.run\\\`. Strict adherence to the provided promise pattern is mandatory for the code to work.\\n-   Use \\\`context.workbook.worksheets.getActiveWorksheet()\\\` unless the user explicitly names a different sheet.\\n-   **CRITICAL:** The \\\`console.log\\\` message inside the \\\`.then()\\\" block MUST be **highly specific** and accurately describe the action *and* the target (e.g., \\\`console.log('Filtered column C for \"Electronics\" in range A1:F100.');\\\`, \\\`console.log('Set background color of cell B5 to yellow.');\\\`, \\\`console.log('Inserted 3 rows above row 10.');\\\`). Generic messages are unacceptable.\\n-   Assume standard Excel object model availability (Range, Worksheet, Workbook, Chart, Table, etc.).\\n\n**Supported Office.js Operations & Patterns (MUST FOLLOW):**\\n-   **Get Active Sheet:** \\\`const sheet = context.workbook.worksheets.getActiveWorksheet();\\\`\\n-   **Get Range:** \\\`const range = sheet.getRange(\"A1:C5\");\\\` or \\\`sheet.getRangeByIndexes(row, col, rowCount, colCount);\\\`\\n-   **Set Fill Color:** \\\`range.format.fill.color = \"#HEXCOLOR\";\\\`\\n-   **Set Font Color:** \\\`range.format.font.color = \"#HEXCOLOR\";\\\`\\n-   **Set Font Style:** \\\`range.format.font.bold = true;\\\` / \\\`italic = true;\\\` / \\\`underline = Excel.UnderlineStyle.single;\\\`\\n-   **Set Alignment:** \\\`range.format.horizontalAlignment = \"Center\";\\\` / \\\`verticalAlignment = \"Top\";\\\`\\n-   **Set Number Format:** \\\`range.numberFormat = [[\"#,##0.00\"]];\\\` or \\\`range.numberFormat = [[\"m/d/yyyy\"]];\\\`\\n-   **Autofit:** \\\`range.format.autofitColumns();\\\` / \\\`range.format.autofitRows();\\\`\\n-   **Clear:** \\\`range.clear(Excel.ClearApplyTo.contents);\\\` / \\\`formats\\\` / \\\`all\\\`\\n-   **Set Values:** \\\`range.values = [[val1, val2], [val3, val4]];\\\`\\n-   **Set Formula:** \\\`range.formulas = [[\"=SUM(A1:A10)\"]];\\\`\\n-   **Load Properties (for reading):** \\\`range.load('values, address, rowCount, formulas');\\\` (Combine loads before sync, include 'formulas')\\n-   **Sort:** \\\`range.sort.apply([{ key: 0, ascending: true }], true);\\\` (key is 0-based col index within range, last arg is hasHeaders)\\n-   **Filter:** \\\`sheet.autoFilter.apply(range, colIndex, { filterOn: \"Values\", values: [\"Crit1\"] });\\\`\\n-   **Remove Filter:** \\\`sheet.autoFilter.remove();\\\`\\n-   **Insert Rows:** \\\`sheet.getRangeByIndexes(rowIndex, 0, 1, 0).getEntireRow().insert(Excel.InsertShiftDirection.down);\\\`\\n-   **Delete Rows:** \\\`sheet.getRangeByIndexes(rowIndex, 0, count, 0).getEntireRow().delete(Excel.DeleteShiftDirection.up);\\\`\\n-   **Insert Columns:** \\\`sheet.getRangeByIndexes(0, colIndex, 0, 1).getEntireColumn().insert(Excel.InsertShiftDirection.right);\\\`\\n-   **Delete Columns:** \\\`sheet.getRangeByIndexes(0, colIndex, 0, count).getEntireColumn().delete(Excel.DeleteShiftDirection.left);\\\`\\n-   **Hide Rows:** \\\`sheet.getRangeByIndexes(rowIndex, 0, count, 0).getEntireRow().rowHidden = true;\\\` (OR \\\`range.format.rowHeight = 0;\\\`)\\n-   **Unhide Rows:** \\\`sheet.getRangeByIndexes(rowIndex, 0, count, 0).getEntireRow().rowHidden = false;\\\`\\n-   **Hide Columns:** \\\`sheet.getRangeByIndexes(0, colIndex, 0, count).getEntireColumn().columnHidden = true;\\\` (OR \\\`range.format.columnWidth = 0;\\\`)\\n-   **Unhide Columns:** \\\`sheet.getRangeByIndexes(0, colIndex, 0, count).getEntireColumn().columnHidden = false;\\\`\\n-   **Create Table:** \\\`sheet.tables.add(\"A1:D5\", true);\\\` (range address, hasHeaders)\\n-   **Create Chart:** \\\`sheet.charts.add(Excel.ChartType.columnClustered, range, Excel.ChartSeriesBy.auto);\\\`\\n-   **Add Worksheet:** \\\`context.workbook.worksheets.add(\"NewSheetName\");\\\`\\n-   **Rename Worksheet:** \\\`sheet.name = \"UpdatedName\";\\\`\\n-   **Delete Worksheet:** \\\`sheet.delete();\\\`\\n-   **Select Range:** \\\`range.select();\\\`\\n-   **Copy Format (Preferred):** \\\`sourceRange.copyFrom(targetRange, Excel.RangeCopyType.formats);\\\`\\n-   **Error Handling:** ALWAYS include \\\`.catch(function(error) { console.log('Error [Action Description]: ' + error); });\\\` - Replace '[Action Description]' with a specific description of what failed.\\n\\n**Contextual Awareness:**\\n-   **Prioritize History:** If the user makes a request (especially formatting/updating) without specifying a target range, check the \'Historical Context\' provided in the prompt. If \'Recently referenced cells/ranges\' exists, **assume the action applies to the MOST RECENT range listed there** unless the user explicitly refers to the selection or another range.\\n-   **Use Provided Context:** Always consider the provided \'Current Excel context\' (active sheet, selection, used range) and \'Historical Context\' to understand the user\'s likely intent.\\n\\n**FORBIDDEN/LEGACY/INVALID APIs (NEVER USE):**\\n-   Do NOT use \\\`await context.sync()\\\` inside \\\`Excel.run\\\` - **Use promise pattern ONLY.**\\n-   Do NOT use \\\`async function(context) { ... }\\\` with \\\`Excel.run\\\`. Use \\\`function(context) { ... }\\\`.\\n-   Do NOT use \\\`.rows.hidden\\\`, \\\`.columns.hidden\\\`, \\\`.rows.unhide()\\\`, \\\`.columns.unhide()\\\`. Use \\\`rowHidden = true/false\\\` or \\\`columnHidden = true/false\\\` on the range object.\\n-   Do NOT use \\\`range.hidden\\\`.\\n-   Do NOT use \\\`ExcelScript\\\` APIs (these are for Office Scripts, not Office.js add-ins).\\n-   Do NOT generate VBA code.\\n\\n**IMPORTANT - Reading Formatting for Copying (Use copyFrom instead):**\\n-   While you *can* load individual format properties, the preferred and more reliable way to copy formats is using \\\`sourceRange.copyFrom(targetRange, Excel.RangeCopyType.formats);\\\`\\n\\n**Example Action Request (Copy Formatting using copyFrom):**\\nUser: Copy the format from column L to column M.\\nAI Response:\\n\\\`\\\`\\\`js\\nExcel.run(function(context) {\\n    const sheet = context.workbook.worksheets.getActiveWorksheet();\\n    // Get the entire columns\\n    const sourceRange = sheet.getRange(\"L:L\");\\n    const targetRange = sheet.getRange(\"M:M\");\\n\\n    // Use copyFrom for formats\\n    sourceRange.copyFrom(targetRange, Excel.RangeCopyType.formats);\\n\\n    return context.sync()\\n      .then(function() {\\n        console.log('Copied format from column L to column M successfully.');\\n      })\\n      .catch(function(error) {\\n        console.log('Error copying format from column L to M: ' + error);\\n      });\\n});\\n\\\`\\\`\\\`\\n\\n**Example Action Request (Filtering):**\\nUser: Filter column C to show only \"Electronics\".\\nAI Response:\\n\\\`\\\`\\\`js\\nExcel.run(function(context) {\\n    const sheet = context.workbook.worksheets.getActiveWorksheet();\\n    const range = sheet.getUsedRange(); // Apply to used range if not specified\\n    sheet.autoFilter.apply(range, 2, { // Column C is index 2\\n        filterOn: Excel.FilterOn.values,\\n        values: [\"Electronics\"]\\n    });\\n    return context.sync()\\n      .then(function() {\\n        console.log('Filter applied to column C for \\\"Electronics\\\".');\\n      })\\n      .catch(function(error) {\\n        console.log('Error applying filter to column C for \\\"Electronics\\\": ' + error);\\n      });\\n});\\n\\\`\\\`\\\`\\n\\n**Example Action Request (Insert Row):**\\nUser: Insert a row above row 5.\\nAI Response:\\n\\\`\\\`\\\`js\\nExcel.run(function(context) {\\n    const sheet = context.workbook.worksheets.getActiveWorksheet();\\n    // Insert *before* row index 4 (which is the 5th row)\\n    const referenceRow = sheet.getRangeByIndexes(4, 0, 1, 0).getEntireRow();\\n    referenceRow.insert(Excel.InsertShiftDirection.down);\\n    return context.sync()\\n      .then(function() {\\n        console.log('Row inserted above row 5 successfully.');\\n      })\\n      .catch(function(error) {\\n        console.log('Error inserting row above row 5: ' + error);\\n      });\\n});\\n\\\`\\\`\\\`\\n\\n**Example Action Request (Update Formula):**\\nUser: Update formula in M2 to only calculate if K2 is Delivered. Existing formula is =SUM(A2:L2)\\nAI Response:\\n\\\`\\\`\\\`js\\nExcel.run(function(context) {\\n    const sheet = context.workbook.worksheets.getActiveWorksheet();\\n    const range = sheet.getRange(\"M2\");\\n    // Combine existing formula with new condition\\n    range.formulas = [[\"=IF(K2=\\\"Delivered\\\", SUM(A2:L2), \\\"\\\")\"]]; \\n    return context.sync()\\n      .then(function() {\\n        console.log('Formula in M2 updated with condition K2=\\\"Delivered\\\" successfully.');\\n      })\\n      .catch(function(error) {\\n        console.log('Error updating formula in M2: ' + error);\\n      });\\n});\\n\\\`\\\`\\\`\\n\\n**Reminder:** For action requests, your *entire* response must be *only* the \\\`\\\`\\\`js code block, following the promise pattern exactly. No extra text.\\n`
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 1000
+      // Determine if we have a simple prompt or a context-enhanced prompt
+      let prompt, conversationHistory = [], contextInfo = null;
+      
+      if (typeof promptData === 'string') {
+        prompt = promptData;
+      } else {
+        // Extract components from the enhanced prompt object
+        prompt = promptData.prompt;
+        conversationHistory = promptData.conversationHistory || [];
+        contextInfo = promptData.excelContext || null;
+      }
+      
+      // Build system message with enhanced context
+      let systemMessage = this.buildSystemMessage(contextInfo, promptData.requestType, promptData.dataProfile, promptData.systemDirectives);
+      
+      // Build messages array for the API call
+      const messages = [
+        { role: 'system', content: systemMessage }
+      ];
+      
+      // Add conversation history if available
+      if (conversationHistory && conversationHistory.length > 0) {
+        // Cap conversation history length to avoid token limits
+        const maxHistoryMessages = Math.min(conversationHistory.length, 10);
+        const recentHistory = conversationHistory.slice(-maxHistoryMessages);
+        
+        // Add each message from history
+        recentHistory.forEach(msg => {
+          messages.push({ role: msg.role, content: msg.content });
+        });
+      }
+      
+      // Add the current prompt as a user message if not already in history
+      if (!conversationHistory || conversationHistory.length === 0 || 
+          conversationHistory[conversationHistory.length - 1].role !== 'user' || 
+          conversationHistory[conversationHistory.length - 1].content !== prompt) {
+        messages.push({ role: 'user', content: prompt });
+      }
+      
+      // Determine which model to use based on complexity
+      let modelToUse = this.defaultModel;
+      if (promptData.dataProfile || (contextInfo && contextInfo.hasComplexData)) {
+        // Use the more capable model for complex data
+        modelToUse = 'gpt-4-turbo';
+      } else if (promptData.requestType === 'formula' || promptData.requestType === 'code') {
+        // Also use better model for formula or code generation
+        modelToUse = 'gpt-4-turbo';
+      }
+
+      // Make the API call
+      const response = await fetch(this.apiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.openai.apiKey}`
+        },
+        body: JSON.stringify({
+          model: modelToUse,
+          messages,
+          temperature: this.getTemperatureForRequestType(promptData.requestType),
+          max_tokens: 2000,
+          top_p: 1,
+          frequency_penalty: 0,
+          presence_penalty: 0,
+        })
       });
 
-      return response.choices[0].message.content;
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error?.message || `API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data.choices || data.choices.length === 0) {
+        throw new Error('No response from OpenAI API');
+      }
+
+      // Return the text content
+      return {
+        success: true,
+        content: data.choices[0].message.content,
+        model: data.model,
+        usage: data.usage
+      };
     } catch (error) {
-      console.error('Error generating text:', error);
-      throw error;
+      console.error('Error in generateText:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to generate text'
+      };
     }
   }
 
-  async suggestFormula(description, model = 'gpt-3.5-turbo') {
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an Excel formula expert. Provide accurate, well-explained Excel formulas.'
-          },
-          {
-            role: 'user',
-            content: `Suggest an Excel formula for the following: ${description}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 1000
-      });
+  /**
+   * Build a comprehensive system message with context
+   */
+  buildSystemMessage(excelContext, requestType, dataProfile, customDirectives) {
+    let systemMessage = `You are an advanced Excel AI Assistant specialized in helping users with Microsoft Excel. 
+Your goal is to provide accurate, helpful, and context-aware responses to Excel-related questions and tasks.
 
-      return response.choices[0].message.content;
-    } catch (error) {
-      console.error('Error suggesting formula:', error);
-      throw error;
+`;
+
+    // Add custom directives if provided
+    if (customDirectives) {
+      systemMessage += `${customDirectives}\n\n`;
+    }
+
+    // Add request type specific instructions
+    systemMessage += this.getRequestTypeInstructions(requestType);
+
+    // Add Excel context information if available
+    if (excelContext) {
+      systemMessage += `\n--- CURRENT EXCEL CONTEXT ---\n`;
+      
+      if (excelContext.workbookName) {
+        systemMessage += `Workbook: ${excelContext.workbookName}\n`;
+      }
+      
+      if (excelContext.activeWorksheet) {
+        systemMessage += `Active Worksheet: ${excelContext.activeWorksheet}\n`;
+      }
+      
+      if (excelContext.selectedRange) {
+        systemMessage += `Selected Range: ${excelContext.selectedRange}\n`;
+      }
+      
+      if (excelContext.usedRange) {
+        systemMessage += `Used Range: ${excelContext.usedRange}\n`;
+      }
+      
+      // Add worksheets info
+      if (excelContext.worksheets && excelContext.worksheets.length > 0) {
+        systemMessage += `\nWorksheets: ${excelContext.worksheets.join(', ')}\n`;
+      }
+
+      // Add data overview if available
+      if (excelContext.dataOverview) {
+        systemMessage += `\nData Overview:\n${JSON.stringify(excelContext.dataOverview, null, 2)}\n`;
+      }
+    }
+
+    // Add data profile if available (for data analysis)
+    if (dataProfile && (requestType === 'analyze' || requestType === 'chart')) {
+      systemMessage += `\n--- DATA PROFILE ---\n`;
+      
+      // Add basic data statistics
+      systemMessage += `Data Range: ${dataProfile.range}\n`;
+      systemMessage += `Rows: ${dataProfile.rowCount}, Columns: ${dataProfile.columnCount}\n`;
+      systemMessage += `Has Headers: ${dataProfile.hasHeaders ? 'Yes' : 'No'}\n`;
+      systemMessage += `Completeness: ${Math.round(dataProfile.completeness * 100)}%\n\n`;
+      
+      // Add column information
+      systemMessage += `Columns:\n`;
+      dataProfile.columns.forEach(column => {
+        systemMessage += `- ${column.name} (${column.dataType}): ${column.nonEmptyCount} non-empty values`;
+        
+        if (column.dataType === 'numeric' && !column.empty) {
+          systemMessage += `, range: ${column.min} to ${column.max}, avg: ${column.mean.toFixed(2)}`;
+        }
+        
+        systemMessage += `\n`;
+      });
+      
+      // Add insights if available
+      if (dataProfile.insights && dataProfile.insights.length > 0) {
+        systemMessage += `\nInsights:\n`;
+        dataProfile.insights.forEach(insight => {
+          systemMessage += `- ${insight.message}\n`;
+        });
+      }
+    }
+
+    // General instructions for all responses
+    systemMessage += `\n--- RESPONSE GUIDELINES ---
+1. Always provide accurate Excel information and formulas
+2. When suggesting Excel formulas, ensure they are syntactically correct
+3. If you don't know something, say so rather than making up information
+4. Keep responses concise and focused on the user's question
+5. Use proper Excel terminology and concepts
+6. When providing code snippets for Office.js, ensure they work in Excel's JavaScript API
+7. Consider the user's Excel context in your responses
+8. For complex actions, break down steps clearly`;
+
+    return systemMessage;
+  }
+
+  /**
+   * Get specific instructions based on request type
+   */
+  getRequestTypeInstructions(requestType) {
+    switch (requestType) {
+      case 'formula':
+        return `You are focused on helping the user create Excel formulas. Provide accurate, efficient formulas that solve their problem.
+When suggesting formulas:
+- Explain how the formula works and why you chose it
+- If multiple approaches exist, mention alternatives
+- Consider edge cases (errors, empty cells, etc.)
+- Use modern Excel functions when appropriate
+- Format complex formulas for readability`;
+
+      case 'analyze':
+        return `You are focused on helping the user analyze their Excel data. Provide clear insights and observations.
+When analyzing data:
+- Identify key trends, patterns, and outliers
+- Suggest appropriate statistical methods
+- Recommend visualization approaches
+- Consider data quality issues
+- Focus on the most relevant insights`;
+
+      case 'chart':
+        return `You are focused on helping the user create effective Excel charts. Provide recommendations for visualizing their data.
+When suggesting charts:
+- Recommend the most appropriate chart type for their data
+- Explain why your suggestion is effective
+- Include customization tips for clarity
+- Consider data structure and relationships
+- Suggest title, labels, and formatting`;
+
+      case 'code':
+        return `You are focused on helping the user with Office.js code for Excel. Provide working code examples.
+When writing Office.js code:
+- Ensure the code follows Excel JavaScript API best practices
+- Include error handling and async/await patterns
+- Structure code for readability and maintenance
+- Consider performance implications
+- Explain key parts of the code`;
+
+      default:
+        return `You are a general Excel AI Assistant. Respond helpfully to any Excel-related questions or tasks.`;
     }
   }
 
-  async analyzeData(data, analysisType, model = 'gpt-3.5-turbo') {
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a data analysis expert specializing in Excel data. Provide clear, actionable insights.'
-          },
-          {
-            role: 'user',
-            content: `Analyze the following data for ${analysisType} insights: ${JSON.stringify(data)}`
-          }
-        ],
-        temperature: 0.5,
-        max_tokens: 1000
-      });
-
-      return response.choices[0].message.content;
-    } catch (error) {
-      console.error('Error analyzing data:', error);
-      throw error;
+  /**
+   * Adjust temperature based on request type for optimal responses
+   */
+  getTemperatureForRequestType(requestType) {
+    switch (requestType) {
+      case 'formula':
+        return 0.1; // Lower temperature for more precise formula generation
+      case 'code':
+        return 0.1; // Lower temperature for code generation
+      case 'analyze':
+        return 0.3; // Slightly higher for analysis to encourage insights
+      case 'chart':
+        return 0.4; // Higher for chart suggestions for creativity
+      default:
+        return 0.7; // Default for general questions
     }
   }
 
-  async generateChart(data, chartType, model = 'gpt-3.5-turbo') {
+  /**
+   * Suggest an Excel formula based on a description
+   * @param {string} description - Description of what the formula should do
+   * @param {object} context - Excel context information
+   * @param {string} model - The model ID to use
+   * @returns {Promise<object>} The formula suggestion response
+   */
+  async suggestFormula(description, context, model = 'gpt-3.5-turbo') {
     try {
-      const response = await this.openai.chat.completions.create({
-        model: model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an Excel charting expert. Provide detailed instructions on creating effective visualizations.'
-          },
-          {
-            role: 'user',
-            content: `Provide detailed instructions for creating a ${chartType} chart with this data: ${JSON.stringify(data)}`
-          }
-        ],
-        temperature: 0.4,
-        max_tokens: 1000
-      });
+      // Build a prompt that focuses on formula generation
+      const formulaPrompt = `I need an Excel formula that does the following: ${description}`;
 
-      return response.choices[0].message.content;
+      // Create prompt data with formula-specific context
+      const promptData = {
+        prompt: formulaPrompt,
+        excelContext: context.excelContext,
+        requestType: 'formula',
+        conversationHistory: context.messages,
+        systemDirectives: `Focus on generating an accurate Excel formula that matches the user's requirements. Provide explanations for how the formula works.`
+      };
+
+      // Generate the formula suggestion using the specified model
+      const response = await this.generateText(promptData, model);
+
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to generate formula suggestion');
+      }
+
+      // Extract the formula from the response
+      // This is a simple extraction - in a real implementation, you might want
+      // to parse the response more carefully to extract just the formula
+      const formulaMatch = response.content.match(/`([^`]+)`|```([^`]+)```/);
+      const formula = formulaMatch ? (formulaMatch[1] || formulaMatch[2]).trim() : response.content;
+
+      return {
+        success: true,
+        formula,
+        explanation: response.content,
+        usage: response.usage
+      };
     } catch (error) {
-      console.error('Error generating chart guidance:', error);
-      throw error;
+      console.error('Error in suggestFormula:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to suggest formula'
+      };
+    }
+  }
+
+  /**
+   * Analyze Excel data and provide insights
+   * @param {string} prompt - The analysis request
+   * @param {object} context - Context including data profile and Excel context
+   * @param {string} model - The model ID to use
+   * @returns {Promise<object>} The analysis response
+   */
+  async analyzeData(prompt, context, model = 'gpt-3.5-turbo') {
+    try {
+      // Create prompt data with analysis-specific context
+      const promptData = {
+        prompt,
+        excelContext: context.excelContext,
+        dataProfile: context.dataProfile,
+        requestType: 'analyze',
+        conversationHistory: context.messages,
+        systemDirectives: `Analyze the provided Excel data and give clear, insightful observations. Focus on patterns, outliers, and notable trends.`
+      };
+
+      // Generate the analysis using the specified model
+      const response = await this.generateText(promptData, model);
+
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to analyze data');
+      }
+
+      return {
+        success: true,
+        analysis: response.content,
+        usage: response.usage
+      };
+    } catch (error) {
+      console.error('Error in analyzeData:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to analyze data'
+      };
+    }
+  }
+
+  /**
+   * Suggest a chart based on data
+   * @param {string} prompt - The chart request
+   * @param {object} context - Context including data profile and Excel context
+   * @param {string} model - The model ID to use
+   * @returns {Promise<object>} The chart suggestion response
+   */
+  async suggestChart(prompt, context, model = 'gpt-3.5-turbo') {
+    try {
+      // Create prompt data with chart-specific context
+      const promptData = {
+        prompt,
+        excelContext: context.excelContext,
+        dataProfile: context.dataProfile,
+        requestType: 'chart',
+        conversationHistory: context.messages,
+        systemDirectives: `Suggest appropriate chart types for visualizing the data. Include specifics on how to create the chart in Excel.`
+      };
+
+      // Generate the chart suggestion using the specified model
+      const response = await this.generateText(promptData, model);
+
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to suggest chart');
+      }
+
+      // For a real implementation, you might parse this to extract specific chart settings
+      // or even generate Office.js code to create the chart
+      
+      return {
+        success: true,
+        suggestion: response.content,
+        usage: response.usage
+      };
+    } catch (error) {
+      console.error('Error in suggestChart:', error);
+      return {
+        success: false,
+        error: error.message || 'Failed to suggest chart'
+      };
     }
   }
 }
 
-export default OpenAIService; 
+// Initialize and export a singleton instance
+const serviceInstance = new OpenAIService(localStorage.getItem('openai_api_key') || '');
+export default serviceInstance; 

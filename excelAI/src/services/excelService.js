@@ -3,6 +3,11 @@ class ExcelService {
     // Initialize operations history array to track all operations for undo
     this.operationsHistory = [];
     this.maxHistoryLength = 50; // Limit history to prevent memory issues
+    this.cachedWorkbookState = null;
+    this.cachedWorksheetData = {};
+    this.lastUpdateTime = null;
+    this.dataCacheTTL = 5000; // 5 seconds TTL for cache
+    this.isProcessing = false;
     console.log("ExcelService initialized with empty operations history");
   }
 
@@ -66,6 +71,222 @@ class ExcelService {
    */
   clearOperationsHistory() {
     this.operationsHistory = [];
+  }
+
+  /**
+   * Preloads all relevant Excel workbook data to enhance AI response reliability
+   * @param {boolean} force - Force refresh even if cache is valid
+   * @returns {Promise<Object>} Comprehensive workbook state
+   */
+  async preloadWorkbookData(force = false) {
+    // If we have recent cached data and not forcing refresh, return it
+    const now = new Date().getTime();
+    if (
+      this.cachedWorkbookState && 
+      this.lastUpdateTime && 
+      (now - this.lastUpdateTime < this.dataCacheTTL) && 
+      !force
+    ) {
+      console.log("Using cached workbook data", this.cachedWorkbookState);
+      return this.cachedWorkbookState;
+    }
+
+    console.log("Preloading workbook data...");
+    
+    try {
+      const workbookState = {};
+      
+      // Set processing flag to prevent concurrent operations
+      if (this.isProcessing) {
+        console.log("Another Excel operation is in progress, waiting...");
+        // Simple retry with timeout
+        return new Promise((resolve) => {
+          setTimeout(async () => {
+            resolve(await this.preloadWorkbookData(force));
+          }, 500);
+        });
+      }
+      
+      this.isProcessing = true;
+      
+      await Excel.run(async (context) => {
+        // Get all worksheets
+        const worksheets = context.workbook.worksheets;
+        worksheets.load("items/name");
+        
+        // Get active worksheet
+        const activeSheet = context.workbook.worksheets.getActiveWorksheet();
+        activeSheet.load("name");
+        
+        // Get selection
+        const selection = context.workbook.getSelectedRange();
+        selection.load("address,values,rowCount,columnCount,formulas,numberFormat");
+        
+        await context.sync();
+        
+        // Store worksheet names
+        workbookState.worksheets = worksheets.items.map(sheet => sheet.name);
+        workbookState.activeWorksheet = activeSheet.name;
+        
+        // Store selection info
+        workbookState.selection = {
+          address: selection.address,
+          values: selection.values,
+          formulas: selection.formulas,
+          rowCount: selection.rowCount,
+          columnCount: selection.columnCount,
+          numberFormat: selection.numberFormat
+        };
+        
+        // Load used range for the active worksheet
+        const usedRange = activeSheet.getUsedRange();
+        usedRange.load("address,values,rowCount,columnCount,formulas,numberFormat");
+        
+        await context.sync();
+        
+        // Store used range info
+        workbookState.usedRange = {
+          address: usedRange.address,
+          rowCount: usedRange.rowCount,
+          columnCount: usedRange.columnCount
+        };
+        
+        // For large ranges, we don't store the full values to avoid memory issues
+        // But we cache worksheet data separately for quicker access later
+        if (usedRange.rowCount * usedRange.columnCount <= 10000) { // Arbitrary limit to prevent memory issues
+          workbookState.usedRangeValues = usedRange.values;
+          workbookState.usedRangeFormulas = usedRange.formulas;
+          
+          // Cache the worksheet data
+          this.cachedWorksheetData[activeSheet.name] = {
+            values: usedRange.values,
+            formulas: usedRange.formulas,
+            numberFormat: usedRange.numberFormat,
+            address: usedRange.address,
+            lastUpdated: now
+          };
+        } else {
+          console.log("Used range too large, storing dimensions only");
+          // For very large ranges, we'll load subsets as needed
+          workbookState.usedRangeTooLarge = true;
+        }
+        
+        // Get tables in the active worksheet
+        const tables = activeSheet.tables;
+        tables.load("items/name,items/id");
+        
+        // Get charts in the active worksheet
+        const charts = activeSheet.charts;
+        charts.load("items/name,items/id,items/type");
+        
+        await context.sync();
+        
+        // Store tables info
+        workbookState.tables = tables.items.map(table => ({
+          name: table.name,
+          id: table.id
+        }));
+        
+        // Store charts info
+        workbookState.charts = charts.items.map(chart => ({
+          name: chart.name,
+          id: chart.id,
+          type: chart.type
+        }));
+      });
+      
+      // Update cache
+      this.cachedWorkbookState = workbookState;
+      this.lastUpdateTime = now;
+      console.log("Workbook data preloaded successfully", workbookState);
+      
+      return workbookState;
+    } catch (error) {
+      console.error("Error preloading workbook data:", error);
+      throw error;
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * Gets data for a specific worksheet with caching
+   * @param {string} worksheetName - Name of the worksheet
+   * @param {boolean} force - Force refresh even if cache is valid
+   * @returns {Promise<Object>} Worksheet data
+   */
+  async getWorksheetData(worksheetName, force = false) {
+    const now = new Date().getTime();
+    
+    // Check if we have valid cached data
+    if (
+      !force && 
+      this.cachedWorksheetData[worksheetName] && 
+      (now - this.cachedWorksheetData[worksheetName].lastUpdated < this.dataCacheTTL)
+    ) {
+      return this.cachedWorksheetData[worksheetName];
+    }
+    
+    try {
+      // Set processing flag to prevent concurrent operations
+      if (this.isProcessing) {
+        console.log("Another Excel operation is in progress, waiting...");
+        // Simple retry with timeout
+        return new Promise((resolve) => {
+          setTimeout(async () => {
+            resolve(await this.getWorksheetData(worksheetName, force));
+          }, 500);
+        });
+      }
+      
+      this.isProcessing = true;
+      
+      let worksheetData = {};
+      
+      await Excel.run(async (context) => {
+        // Get the worksheet
+        let sheet;
+        try {
+          sheet = context.workbook.worksheets.getItem(worksheetName);
+        } catch (e) {
+          throw new Error(`Worksheet "${worksheetName}" not found`);
+        }
+        
+        // Get used range
+        const usedRange = sheet.getUsedRange();
+        usedRange.load("address,values,rowCount,columnCount,formulas,numberFormat");
+        
+        await context.sync();
+        
+        worksheetData = {
+          address: usedRange.address,
+          values: usedRange.values,
+          formulas: usedRange.formulas,
+          numberFormat: usedRange.numberFormat,
+          rowCount: usedRange.rowCount,
+          columnCount: usedRange.columnCount,
+          lastUpdated: now
+        };
+      });
+      
+      // Update cache
+      this.cachedWorksheetData[worksheetName] = worksheetData;
+      
+      return worksheetData;
+    } catch (error) {
+      console.error(`Error getting data for worksheet "${worksheetName}":`, error);
+      throw error;
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * Invalidates the cached data to force a refresh on next access
+   */
+  invalidateCache() {
+    this.lastUpdateTime = null;
+    console.log("Cache invalidated");
   }
 
   /**
@@ -135,6 +356,8 @@ class ExcelService {
         this.operationsHistory.shift();
         // Log the updated history
         console.log("Updated operations history after undo:", this.operationsHistory);
+        // Invalidate cache after an undo operation
+        this.invalidateCache();
       }
 
       return {
@@ -507,12 +730,15 @@ class ExcelService {
   }
 
   /**
-   * Inserts text into a specified cell
-   * @param {string} text - The text to insert
-   * @param {string} address - The cell address (e.g., "A1")
-   * @returns {Promise} - A promise that resolves when the operation is complete
+   * Enhanced method to insert text with improved error handling and caching
+   * @param {string} text - Text to insert
+   * @param {string} address - Cell address
+   * @returns {Promise<Object>} Result of operation
    */
   async insertText(text, address) {
+    // Invalidate cache first
+    this.invalidateCache();
+    
     try {
       let previousValue;
       
@@ -520,26 +746,30 @@ class ExcelService {
         const sheet = context.workbook.worksheets.getActiveWorksheet();
         const range = sheet.getRange(address);
         
-        // Load the current value for undo purposes
+        // Load current value to store for undo
         range.load("values");
         await context.sync();
         
+        // Store previous value for undo
         previousValue = range.values[0][0];
+        
+        // Set the new text value
         range.values = [[text]];
+        
         await context.sync();
       });
       
-      // Track operation for undo
+      // Track the operation for undo
       this._trackOperation("insertText", {
         address,
         text,
         previousValue
       });
       
-      return { success: true };
+      return { success: true, previousValue };
     } catch (error) {
       console.error("Error inserting text:", error);
-      return { success: false, error: error.message };
+      return { success: false, message: error.message };
     }
   }
 
@@ -921,33 +1151,49 @@ class ExcelService {
   }
 
   /**
-   * Retrieves all data from the active worksheet
-   * @returns {Promise<Object>} - A promise that resolves with all worksheet data
+   * Enhanced method to get all worksheet data with comprehensive caching
+   * @returns {Promise<Object>} All data from the active worksheet
    */
   async getAllData() {
     try {
+      const workbookState = await this.preloadWorkbookData();
+      
+      // If we already have the used range values in the state, return them
+      if (workbookState.usedRangeValues) {
+        return {
+          success: true,
+          data: workbookState.usedRangeValues,
+          formulas: workbookState.usedRangeFormulas,
+          address: workbookState.usedRange.address,
+          rowCount: workbookState.usedRange.rowCount,
+          columnCount: workbookState.usedRange.columnCount
+        };
+      }
+      
+      // For very large ranges, get data directly
       let result = {};
+      
       await Excel.run(async (context) => {
         const sheet = context.workbook.worksheets.getActiveWorksheet();
-        const usedRange = sheet.getUsedRange();
-        usedRange.load(["address", "values", "rowCount", "columnCount"]);
+        const range = sheet.getUsedRange();
+        
+        range.load("address,values,rowCount,columnCount,formulas");
         await context.sync();
         
-        // Check if the worksheet is empty
-        const isEmpty = usedRange.rowCount === 0 || usedRange.columnCount === 0;
-        
         result = {
-          address: usedRange.address,
-          values: usedRange.values,
-          rowCount: usedRange.rowCount,
-          columnCount: usedRange.columnCount,
-          isEmpty: isEmpty
+          success: true,
+          data: range.values,
+          formulas: range.formulas,
+          address: range.address,
+          rowCount: range.rowCount,
+          columnCount: range.columnCount
         };
       });
-      return { success: true, ...result };
+      
+      return result;
     } catch (error) {
-      console.error("Error getting all worksheet data:", error);
-      return { success: false, error: error.message };
+      console.error("Error getting all data:", error);
+      return { success: false, message: error.message };
     }
   }
 
