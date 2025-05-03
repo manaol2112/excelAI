@@ -820,15 +820,38 @@ class ExcelService {
    */
   async getData(range) {
     try {
-      let result;
-      await Excel.run(async (context) => {
-        const sheet = context.workbook.worksheets.getActiveWorksheet();
-        const rangeObj = sheet.getRange(range);
-        rangeObj.load("values");
-        await context.sync();
-        result = rangeObj.values;
+      // Create a promise to handle the asynchronous operation
+      return new Promise(async (resolve, reject) => {
+        try {
+          let result = {};
+          
+          await Excel.run(async (context) => {
+            // Get active worksheet and range
+            const sheet = context.workbook.worksheets.getActiveWorksheet();
+            const rangeObj = sheet.getRange(range);
+            
+            // Load all necessary properties in a single batch
+            rangeObj.load(["values", "rowCount", "columnCount", "address"]);
+            
+            // Get a single sync point to ensure data consistency
+            await context.sync();
+            
+            // Store all properties after sync
+            result = {
+              success: true,
+              data: rangeObj.values,
+              rowCount: rangeObj.rowCount,
+              columnCount: rangeObj.columnCount,
+              address: rangeObj.address
+            };
+          });
+          
+          resolve(result);
+        } catch (error) {
+          console.error("Error in getData promise:", error);
+          reject({ success: false, error: error.message });
+        }
       });
-      return { success: true, data: result };
     } catch (error) {
       console.error("Error getting data:", error);
       return { success: false, error: error.message };
@@ -841,21 +864,42 @@ class ExcelService {
    */
   async getSelectedRange() {
     try {
-      let result = {};
-      await Excel.run(async (context) => {
-        const range = context.workbook.getSelectedRange();
-        range.load(["address", "values", "rowCount", "columnCount", "formulas"]);
-        await context.sync();
-        
-        result = {
-          address: range.address,
-          values: range.values,
-          rowCount: range.rowCount,
-          columnCount: range.columnCount,
-          formulas: range.formulas
-        };
+      return new Promise(async (resolve, reject) => {
+        try {
+          let result = {};
+          
+          await Excel.run(async (context) => {
+            // Get the current selection
+            const range = context.workbook.getSelectedRange();
+            
+            // Load all necessary properties in a single batch
+            range.load(["address", "values", "rowCount", "columnCount", "formulas", "numberFormat"]);
+            
+            // Get worksheet info
+            const sheet = context.workbook.worksheets.getActiveWorksheet();
+            sheet.load("name");
+            
+            // Single sync point for all data
+            await context.sync();
+            
+            // Store all properties after sync
+            result = {
+              address: range.address,
+              values: range.values,
+              rowCount: range.rowCount,
+              columnCount: range.columnCount,
+              formulas: range.formulas,
+              numberFormat: range.numberFormat,
+              worksheet: sheet.name
+            };
+          });
+          
+          resolve({ success: true, data: result });
+        } catch (error) {
+          console.error("Error in getSelectedRange promise:", error);
+          reject({ success: false, error: error.message });
+        }
       });
-      return { success: true, data: result };
     } catch (error) {
       console.error("Error getting selected range:", error);
       return { success: false, error: error.message };
@@ -1399,7 +1443,7 @@ class ExcelService {
    * @param {string} codeString - The Office.js code to execute (should include its own Excel.run)
    * @returns {Promise<Object>} - A promise that resolves with the execution result
    */
-  async executeOfficeJsCode(codeString) {
+  async execute(codeString) {
     try {
       console.log("Attempting to execute Office.js code string:", codeString);
 
@@ -1415,7 +1459,7 @@ class ExcelService {
       const asyncFunction = new Function('Excel', 'console', `return (async () => { ${codeString} })();`);
 
       // Execute the function, passing the global Excel and console objects.
-      await asyncFunction(Excel, console);
+      const result = await asyncFunction(Excel, console);
 
       // Track this operation in history
       this._trackOperation("executeCode", {
@@ -1423,8 +1467,8 @@ class ExcelService {
         timestamp: new Date().getTime()
       });
 
-      console.log("Office.js code string execution completed successfully.");
-      return { success: true };
+      console.log("Office.js code string execution completed successfully. Result:", result);
+      return { success: true, ...result };
     } catch (error) {
       console.error("Error executing Office.js code string:", error);
       let errorDetails = {
@@ -1434,6 +1478,174 @@ class ExcelService {
       };
       console.log("Error details:", errorDetails);
       return { success: false, error: error.message, details: errorDetails };
+    }
+  }
+  
+  /**
+   * Directly count occurrences of a specific value in a column
+   * @param {string} columnLetter - Column letter (e.g., "A", "B", etc.)
+   * @param {string} targetValue - Value to count
+   * @param {boolean} caseInsensitive - Whether the match should be case insensitive
+   * @returns {Promise<Object>} Count result
+   */
+  async countInColumn(columnLetter, targetValue, caseInsensitive = false) {
+    try {
+      const code = `
+        return (async () => {
+          try {
+            let count = 0;
+            let matchedRows = [];
+            
+            await Excel.run(async (context) => {
+              const sheet = context.workbook.worksheets.getActiveWorksheet();
+              const usedRange = sheet.getUsedRange();
+              usedRange.load("address");
+              await context.sync();
+              
+              // Get just the column we need
+              const columnRange = sheet.getRange("${columnLetter}:${columnLetter}");
+              columnRange.load("values");
+              await context.sync();
+              
+              const values = columnRange.values;
+              const searchValue = "${targetValue}";
+              
+              for (let i = 0; i < values.length; i++) {
+                const cellValue = values[i][0];
+                let isMatch = false;
+                
+                if (cellValue !== null && cellValue !== undefined) {
+                  if (${caseInsensitive}) {
+                    isMatch = String(cellValue).toLowerCase() === searchValue.toLowerCase();
+                  } else {
+                    isMatch = String(cellValue) === searchValue;
+                  }
+                }
+                
+                if (isMatch) {
+                  count++;
+                  matchedRows.push(i + 1); // Excel rows are 1-indexed
+                }
+              }
+            });
+            
+            return { 
+              success: true, 
+              count: count, 
+              matchedRows: matchedRows,
+              column: "${columnLetter}",
+              targetValue: "${targetValue}"
+            };
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        })();
+      `;
+      
+      return await this.execute(code);
+    } catch (error) {
+      console.error("Error counting in column:", error);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  /**
+   * Analyze a column and return statistics about its data
+   * @param {string} columnLetter - Column letter (e.g., "A", "B", etc.)
+   * @returns {Promise<Object>} Analysis result
+   */
+  async analyzeColumn(columnLetter) {
+    try {
+      const code = `
+        return (async () => {
+          try {
+            await Excel.run(async (context) => {
+              const sheet = context.workbook.worksheets.getActiveWorksheet();
+              
+              // Get just the column we need
+              const columnRange = sheet.getRange("${columnLetter}:${columnLetter}");
+              columnRange.load("values");
+              await context.sync();
+              
+              const values = columnRange.values;
+              const totalCells = values.length;
+              
+              // Initialize counters and containers
+              let nonEmptyCells = 0;
+              let emptyCells = 0;
+              const valueMap = new Map();
+              const numericValues = [];
+              
+              // Analyze the column data
+              for (let i = 0; i < values.length; i++) {
+                const cellValue = values[i][0];
+                
+                // Check if empty or not
+                if (cellValue === null || cellValue === undefined || cellValue === "") {
+                  emptyCells++;
+                } else {
+                  nonEmptyCells++;
+                  
+                  // Count occurrences of each value
+                  const strValue = String(cellValue);
+                  valueMap.set(
+                    strValue, 
+                    (valueMap.get(strValue) || 0) + 1
+                  );
+                  
+                  // Check if numeric and collect for stats
+                  const numValue = Number(cellValue);
+                  if (!isNaN(numValue)) {
+                    numericValues.push(numValue);
+                  }
+                }
+              }
+              
+              // Calculate numerical stats if applicable
+              let numericalStats = null;
+              if (numericValues.length > 0) {
+                const sum = numericValues.reduce((acc, val) => acc + val, 0);
+                const average = sum / numericValues.length;
+                const min = Math.min(...numericValues);
+                const max = Math.max(...numericValues);
+                
+                numericalStats = {
+                  sum,
+                  average,
+                  min,
+                  max,
+                  count: numericValues.length
+                };
+              }
+              
+              // Create sorted array of value frequencies
+              const topValues = Array.from(valueMap.entries())
+                .map(([value, count]) => ({ value, count }))
+                .sort((a, b) => b.count - a.count);
+              
+              return {
+                success: true,
+                analysis: {
+                  totalCells,
+                  nonEmptyCells,
+                  emptyCells,
+                  uniqueValueCount: valueMap.size,
+                  topValues: topValues.slice(0, 10),
+                  numericalStats,
+                  column: "${columnLetter}"
+                }
+              };
+            });
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        })();
+      `;
+      
+      return await this.execute(code);
+    } catch (error) {
+      console.error("Error analyzing column:", error);
+      return { success: false, error: error.message };
     }
   }
 
@@ -2402,490 +2614,552 @@ class ExcelService {
   async _undoUnhideColumns(details) {
     return this.hideColumns(details.colIndex, details.count);
   }
-}
 
-/**
- * Apply formatting only to cells that contain specific text
- * @param {string} range - Range to check (e.g., "A1:D10" or "A:A")
- * @param {string} content - Text content to match
- * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
- * @returns {Promise<object>} - Result with count of formatted cells
- */
-export const formatCellsByContent = async (range, content, options = {}) => {
-  let formattedCount = 0;
-  let affectedCellsUndoData = []; // Store previous format data for undo
-
-  return new Promise((resolve, reject) => {
+  /**
+   * Get data from a specific range with detailed analysis
+   * @param {string} rangeAddress - The address of the range to analyze
+   * @param {Object} options - Analysis options
+   * @param {boolean} options.forceIncludeAllRows - Force include all rows, even if headers are detected
+   * @param {boolean} options.treatFirstRowAsHeader - Explicitly treat first row as header
+   * @returns {Promise<Object>} Analysis result
+   */
+  async getSelectionData(rangeAddress, options = {}) {
     try {
-      Excel.run(async (context) => {
-        const worksheet = context.workbook.worksheets.getActiveWorksheet();
-        const rangeObj = worksheet.getRange(range);
-        // Load only values initially needed to find matches
-        rangeObj.load("address, rowCount, columnCount, values");
-        await context.sync();
-
-        console.log(`Checking range ${rangeObj.address} for cells containing "${content}"`);
-
-        // 1. Find matching cell indices without Excel API calls inside loop
-        const matchingCellIndices = [];
-        for (let r = 0; r < rangeObj.rowCount; r++) {
-          for (let c = 0; c < rangeObj.columnCount; c++) {
-            const cellValue = rangeObj.values[r][c];
-            const isMatch = cellValue !== null &&
-                          cellValue !== undefined &&
-                          cellValue.toString().toLowerCase().includes(content.toLowerCase());
-            if (isMatch) {
-              matchingCellIndices.push({ r, c });
-              formattedCount++;
-            }
-          }
-        }
-
-        if (matchingCellIndices.length > 0) {
-          // 2. Create proxy objects and prepare batch load
-          const cellProxies = [];
-          matchingCellIndices.forEach(({ r, c }) => {
-            const cell = rangeObj.getCell(r, c);
-            // 3. Load required properties for all matching cells
-            cell.load("address");
-            // Load specific format properties needed for undo and potential setting
-            cell.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
-            cellProxies.push(cell);
-          });
-
-          // 4. Sync once after loading all properties
+      console.log(`ExcelService: Starting detailed analysis of range: ${rangeAddress}`);
+      
+      // First validate the range address
+      if (!rangeAddress || typeof rangeAddress !== 'string') {
+        console.error('Invalid range address provided:', rangeAddress);
+        return { success: false, error: 'Invalid range address provided' };
+      }
+      
+      // Try to perform a direct load first to verify the range is valid
+      let isRangeValid = false;
+      try {
+        await Excel.run(async (context) => {
+          const sheet = context.workbook.worksheets.getActiveWorksheet();
+          sheet.load("name");
+          
+          const testRange = sheet.getRange(rangeAddress);
+          testRange.load("address");
           await context.sync();
-
-          // 5. Iterate through loaded proxies, store previous format, apply new format
-          cellProxies.forEach(cell => {
-            // Read loaded properties and store for undo
-             affectedCellsUndoData.push({
-               address: cell.address,
-               previousFill: cell.format.fill.color,
-               previousFontColor: cell.format.font.color,
-               previousBold: cell.format.font.bold,
-               previousItalic: cell.format.font.italic,
-               previousUnderline: cell.format.font.underline,
-             });
-
-            // Apply formatting properties to the proxy object
-            if (options.fillColor) {
-              cell.format.fill.color = options.fillColor;
-            }
-            if (options.fontColor) {
-              cell.format.font.color = options.fontColor;
-            }
-            if (options.bold !== undefined) {
-              cell.format.font.bold = options.bold;
-            }
-            if (options.italic !== undefined) {
-              cell.format.font.italic = options.italic;
-            }
-            // Check for underline property specifically
-            if (options.underline !== undefined) {
-              // Ensure we use the correct Excel Enum if applicable, or a valid string like "None"
-              cell.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
-            }
-          });
-
-           // 6. Sync once at the end to apply all format changes
-          await context.sync();
-
-          // Track operation for undo using the collected data
-          if (excelService) {
-            excelService._trackOperation("formatCellsByContent", {
-              range: rangeObj.address,
-              content,
-              options,
-              affectedCells: affectedCellsUndoData // Use the collected data
-            });
-          }
-        } else {
-           console.log("No matching cells found to format.");
-        }
-
-        resolve({
-          formattedCount,
-          success: true,
-          message: `Applied formatting to ${formattedCount} cell(s) containing "${content}" in range ${rangeObj.address}`
+          
+          console.log(`Range validation successful: ${testRange.address}`);
+          isRangeValid = true;
         });
-      }).catch(error => {
-        console.error("Error in formatCellsByContent Excel.run:", error);
-        // Check for the specific property not loaded error
-        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
-           reject({
-             success: false,
-             error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
-             details: error
-           });
-        } else {
-           reject({
-             success: false,
-             error: error.message || "Error formatting cells",
-             details: error
-           });
-        }
-      });
-    } catch (error) {
-      // Catch errors thrown before Excel.run starts
-      console.error("Outer Error in formatCellsByContent:", error);
-      reject({
-        success: false,
-        error: error.message || "Error setting up formatCellsByContent",
-        details: error
-      });
-    }
-  });
-};
+      } catch (error) {
+        console.error(`Range validation failed for ${rangeAddress}:`, error);
+        return { success: false, error: `The range ${rangeAddress} could not be found or is invalid.` };
+      }
+      
+      if (!isRangeValid) {
+        return { success: false, error: 'Range validation failed' };
+      }
 
-/**
- * Format entire rows based on a condition in a specific column
- * @param {string} range - Range to check (e.g., "A1:D10" or "A:D")
- * @param {string} columnRef - Column to check for the condition (e.g., "B" or index like "2")
- * @param {string} condition - Text content to match or special keyword like "empty", "missing", "blank"
- * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
- * @returns {Promise<object>} - Result with count of formatted rows
- */
-export const formatRowsByCondition = async (range, columnRef, condition, options = {}) => {
-  let formattedCount = 0;
-  let affectedRowsUndoData = []; // Store previous format data for undo
-
-  return new Promise((resolve, reject) => {
-    try {
-      Excel.run(async (context) => {
-        const worksheet = context.workbook.worksheets.getActiveWorksheet();
-        const rangeObj = worksheet.getRange(range);
-        // Load values initially needed to find matches
-        rangeObj.load("address, rowCount, columnCount, values");
-        await context.sync();
-
-        console.log(`Checking range ${rangeObj.address} for rows where column ${columnRef} satisfies condition "${condition}"`);
-
-        // Determine which column index to check
-        let columnIndex;
-        if (/^\\d+$/.test(columnRef)) {
-          columnIndex = parseInt(columnRef, 10) - 1; // Convert 1-based user input to 0-based index
-        } else {
-          // Attempt to convert column letter to 0-based index
+      const code = `
+        return (async () => {
           try {
-            const tempRange = worksheet.getRange(`${columnRef}1`);
-            tempRange.load("columnIndex");
-            await context.sync();
-            columnIndex = tempRange.columnIndex;
-          } catch (e) {
-             throw new Error(`Invalid column reference: ${columnRef}`);
-          }
-        }
+            console.log("Starting Excel.run for selection analysis");
+            let result = {
+              values: [],
+              headers: [],
+              summary: {
+                rowCount: 0,
+                columnCount: 0,
+                nonEmptyCells: 0,
+                emptyCells: 0,
+                hasNumericData: false,
+                hasTextData: false
+              },
+              columns: []
+            };
+            
+            await Excel.run(async (context) => {
+              try {
+                const sheet = context.workbook.worksheets.getActiveWorksheet();
+                sheet.load("name");
+                await context.sync();
+                
+                console.log("Analyzing selection in sheet: " + sheet.name);
+                
+                // Get the specified range
+                const range = sheet.getRange("${rangeAddress}");
+                range.load("values, rowCount, columnCount, address");
+                
+                // Ensure proper synchronization
+                await context.sync();
+                
+                console.log("Range loaded successfully: " + range.address + " with dimensions " + range.rowCount + "x" + range.columnCount);
 
-        // Validate column index relative to the provided range
-        const rangeStartColIndex = worksheet.getRange(range).getColumnsBefore(columnIndex).getCount();
-        await context.sync();
-        if (rangeStartColIndex < 0 || rangeStartColIndex >= rangeObj.columnCount) {
-             throw new Error(`Column index derived from ${columnRef} is outside the specified range ${rangeObj.address}`);
-        }
-        const relativeColumnIndex = rangeStartColIndex; // Use the 0-based index relative to the range start
+                if (range.rowCount === 0 || range.columnCount === 0) {
+                  throw new Error("Selection is empty or has zero dimensions");
+                }
 
-        const isEmptyCheck = ["empty", "missing", "blank", "null", "undefined"].includes(
-          condition.toLowerCase().trim()
-        );
-
-        // 1. Find matching row indices without Excel API calls inside loop
-        const matchingRowIndices = []; // Store 0-based row index within the range
-        for (let r = 0; r < rangeObj.rowCount; r++) {
-          const cellValue = rangeObj.values[r][relativeColumnIndex]; // Use relative index
-          let isMatch = false;
-
-          if (isEmptyCheck) {
-            isMatch = cellValue === null ||
-                     cellValue === undefined ||
-                     String(cellValue).trim() === ""; // Check trimmed string value too
-          } else {
-            isMatch = cellValue !== null &&
-                     cellValue !== undefined &&
-                     String(cellValue).toLowerCase().includes(condition.toLowerCase());
-          }
-
-          if (isMatch) {
-            matchingRowIndices.push(r);
-            formattedCount++;
-          }
-        }
-
-        if (matchingRowIndices.length > 0) {
-          // 2. Create proxy objects and prepare batch load for entire rows
-          const rowProxies = [];
-          matchingRowIndices.forEach(rowIndex => {
-            // Get the entire row object corresponding to the match within the original range
-            const rowRange = rangeObj.getRow(rowIndex);
-            // 3. Load required properties for all matching rows
-            rowRange.load("address");
-            rowRange.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
-            rowProxies.push(rowRange);
-          });
-
-          // 4. Sync once after loading all properties
-          await context.sync();
-
-          // 5. Iterate through loaded proxies, store previous format, apply new format
-          rowProxies.forEach(rowRange => {
-             // Read loaded properties and store for undo
-             affectedRowsUndoData.push({
-               address: rowRange.address,
-               previousFill: rowRange.format.fill.color,
-               previousFontColor: rowRange.format.font.color,
-               previousBold: rowRange.format.font.bold,
-               previousItalic: rowRange.format.font.italic,
-               previousUnderline: rowRange.format.font.underline,
-             });
-
-            // Apply formatting properties to the proxy object
-            if (options.fillColor) {
-              rowRange.format.fill.color = options.fillColor;
-            }
-            if (options.fontColor) {
-              rowRange.format.font.color = options.fontColor;
-            }
-            if (options.bold !== undefined) {
-              rowRange.format.font.bold = options.bold;
-            }
-            if (options.italic !== undefined) {
-              rowRange.format.font.italic = options.italic;
-            }
-            if (options.underline !== undefined) {
-               rowRange.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
-            }
-          });
-
-          // 6. Sync once at the end to apply all format changes
-          await context.sync();
-
-          // Track operation for undo using the collected data
-          if (excelService) {
-            excelService._trackOperation("formatRowsByCondition", {
-              range: rangeObj.address,
-              columnRef,
-              condition,
-              options,
-              affectedCells: affectedRowsUndoData // Use the collected data (renamed variable for consistency)
+                // Store basic info
+                result.values = range.values;
+                result.summary.rowCount = range.rowCount;
+                result.summary.columnCount = range.columnCount;
+                result.address = range.address;
+                
+                // Determine if headers exist based on options or heuristics
+                let hasHeaders = false;
+                
+                if (${options.treatFirstRowAsHeader === true}) {
+                  // Explicitly set by caller
+                  hasHeaders = true;
+                  console.log("Using first row as header based on explicit setting");
+                } else if (${options.forceIncludeAllRows === true}) {
+                  // Explicitly include all rows
+                  hasHeaders = false;
+                  console.log("Including all rows, not treating any as headers per request");
+                } else if (range.rowCount > 1) {
+                  // Use a more conservative header detection - 
+                  // Consider headers only if multiple cells in first row are strings
+                  // and second row has a different pattern (e.g., numbers)
+                  const firstRowStrings = range.values[0].filter(cell => 
+                    cell !== null && cell !== undefined && cell !== "" && 
+                    typeof cell === 'string' && 
+                    isNaN(parseFloat(cell))
+                  ).length;
+                  
+                  const firstRowTotal = range.values[0].filter(cell => 
+                    cell !== null && cell !== undefined && cell !== ""
+                  ).length;
+                  
+                  // If >50% of populated cells in first row are strings, and we have data
+                  if (firstRowStrings > 0 && firstRowTotal > 0 && 
+                      (firstRowStrings / firstRowTotal > 0.5)) {
+                    hasHeaders = true;
+                    console.log("Detected headers - first row has string labels");
+                  } else {
+                    console.log("No headers detected - first row doesn't match header pattern");
+                    hasHeaders = false;
+                  }
+                }
+                
+                result.hasHeaders = hasHeaders;
+                console.log("Header detection result:", hasHeaders);
+                
+                // Extract potential headers
+                if (hasHeaders) {
+                  result.headers = range.values[0].map((cell, index) => {
+                    return cell || \`Column \${index + 1}\`;
+                  });
+                } else {
+                  // Generate generic header names
+                  result.headers = Array.from({ length: range.columnCount }, (_, i) => \`Column \${i + 1}\`);
+                }
+                
+                // Setup column analysis
+                result.columns = Array(range.columnCount).fill().map((_, i) => ({
+                  index: i,
+                  name: result.headers[i],
+                  values: [],
+                  nonEmptyCount: 0,
+                  emptyCount: 0,
+                  uniqueValues: new Set(),
+                  dataType: 'unknown',
+                  numericValues: [],
+                  textValues: []
+                }));
+                
+                // Process each cell for detailed stats
+                let emptyCells = 0;
+                let nonEmptyCells = 0;
+                
+                // IMPORTANT: Always analyze ALL rows, but report values accordingly
+                // Track all cells for stats, even header row
+                for (let r = 0; r < range.rowCount; r++) {
+                  const isHeaderRow = (r === 0 && hasHeaders);
+                  
+                  for (let c = 0; c < range.columnCount; c++) {
+                    const value = range.values[r][c];
+                    const columnInfo = result.columns[c];
+                    
+                    // Only add to column values array if not header
+                    if (!isHeaderRow) {
+                      columnInfo.values.push(value);
+                    }
+                    
+                    // But still count header row in total summaries
+                    if (value === null || value === undefined || value === "") {
+                      emptyCells++;
+                      columnInfo.emptyCount += isHeaderRow ? 0 : 1;
+                    } else {
+                      nonEmptyCells++;
+                      if (!isHeaderRow) {
+                        columnInfo.nonEmptyCount++;
+                        columnInfo.uniqueValues.add(String(value));
+                        
+                        // Detect data type
+                        const numValue = parseFloat(value);
+                        if (!isNaN(numValue)) {
+                          columnInfo.numericValues.push(numValue);
+                          result.summary.hasNumericData = true;
+                          
+                          if (columnInfo.dataType === 'unknown') {
+                            columnInfo.dataType = 'numeric';
+                          }
+                        } else {
+                          columnInfo.textValues.push(String(value));
+                          result.summary.hasTextData = true;
+                          
+                          // If mixed but we previously thought numeric, change to mixed
+                          if (columnInfo.dataType === 'numeric') {
+                            columnInfo.dataType = 'mixed';
+                          } else if (columnInfo.dataType === 'unknown') {
+                            columnInfo.dataType = 'text';
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                // Update summary counts
+                result.summary.emptyCells = emptyCells;
+                result.summary.nonEmptyCells = nonEmptyCells;
+                
+                // Calculate statistics for each column
+                for (let c = 0; c < range.columnCount; c++) {
+                  const columnInfo = result.columns[c];
+                  
+                  // Convert Set to array for better serialization
+                  columnInfo.uniqueValues = Array.from(columnInfo.uniqueValues);
+                  
+                  // Calculate numerical stats if we have numbers
+                  if (columnInfo.numericValues.length > 0) {
+                    const sum = columnInfo.numericValues.reduce((a, b) => a + b, 0);
+                    const avg = sum / columnInfo.numericValues.length;
+                    const sortedNums = [...columnInfo.numericValues].sort((a, b) => a - b);
+                    const min = sortedNums[0];
+                    const max = sortedNums[sortedNums.length - 1];
+                    
+                    columnInfo.stats = {
+                      sum,
+                      average: avg,
+                      min,
+                      max,
+                      count: columnInfo.numericValues.length
+                    };
+                  }
+                  
+                  // Reduce the data we return - just top 5 unique values with counts
+                  const valueCounts = {};
+                  
+                  // Count occurrences of each value
+                  columnInfo.values.forEach(val => {
+                    if (val !== null && val !== undefined && val !== "") {
+                      const key = String(val);
+                      valueCounts[key] = (valueCounts[key] || 0) + 1;
+                    }
+                  });
+                  
+                  // Convert to array, sort by count desc, limit to top 5
+                  columnInfo.topValues = Object.entries(valueCounts)
+                    .map(([value, count]) => ({ value, count }))
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, 5);
+                  
+                  // Clean up large arrays before returning
+                  delete columnInfo.values;
+                  delete columnInfo.numericValues;
+                  delete columnInfo.textValues;
+                }
+              } catch (error) {
+                console.error("Error analyzing selection:", error);
+                return { success: false, error: error.message };
+              }
             });
-          }
-        } else {
-           console.log("No matching rows found to format.");
-        }
-
-        let conditionDescription = isEmptyCheck ?
-          "missing or empty" :
-          `containing "${condition}"`;
-        resolve({
-          formattedCount,
+            
+            return { 
           success: true,
-          message: `Applied formatting to ${formattedCount} row(s) where column ${columnRef} is ${conditionDescription} in range ${rangeObj.address}`
-        });
-      }).catch(error => {
-        console.error("Error in formatRowsByCondition Excel.run:", error);
-        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
-             reject({
-               success: false,
-               error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
-               details: error
-             });
-        } else {
-             reject({
-               success: false,
-               error: error.message || "Error formatting rows by condition",
-               details: error
-             });
-        }
-      });
+              data: result
+            };
     } catch (error) {
-      console.error("Outer Error in formatRowsByCondition:", error);
-      reject({
-        success: false,
-        error: error.message || "Error setting up formatRowsByCondition",
-        details: error
-      });
-    }
-  });
-};
-
-/**
- * Format rows based on exact match in a specific column (not just contains)
- * @param {string} range - Range to check (e.g., "A1:D10" or "A:D")
- * @param {string} columnRef - Column to check for the condition (e.g., "B" or index like "2")
- * @param {string} exactValue - Exact value to match (case insensitive)
- * @param {object} options - Formatting options (fillColor, fontColor, bold, italic, underline)
- * @returns {Promise<object>} - Result with count of formatted rows
- */
-export const formatRowsByExactMatch = async (range, columnRef, exactValue, options = {}) => {
-  let formattedCount = 0;
-  let affectedRowsUndoData = []; // Store previous format data for undo
-
-  return new Promise((resolve, reject) => {
-    try {
-      Excel.run(async (context) => {
-        const worksheet = context.workbook.worksheets.getActiveWorksheet();
-        const rangeObj = worksheet.getRange(range);
-        // Load values initially needed to find matches
-        rangeObj.load("address, rowCount, columnCount, values");
-        await context.sync();
-
-        console.log(`Checking range ${rangeObj.address} for rows where column ${columnRef} equals "${exactValue}"`);
-
-        // Determine which column index to check (relative to the start of the range)
-        let relativeColumnIndex;
-         try {
-            const fullColRange = worksheet.getRange(`${columnRef}1`);
-            fullColRange.load("columnIndex");
-            await context.sync();
-            const absoluteColIndex = fullColRange.columnIndex;
-
-            const rangeStartColRange = rangeObj.getColumn(0);
-            rangeStartColRange.load("columnIndex");
-            await context.sync();
-            const rangeStartColIndex = rangeStartColRange.columnIndex;
-
-            relativeColumnIndex = absoluteColIndex - rangeStartColIndex;
-
-            if (relativeColumnIndex < 0 || relativeColumnIndex >= rangeObj.columnCount) {
-                 throw new Error(`Column ${columnRef} is outside the specified range ${rangeObj.address}`);
-            }
-         } catch (e) {
-             throw new Error(`Invalid column reference or range setup: ${columnRef}. ${e.message}`);
-         }
-
-        // 1. Find matching row indices without Excel API calls inside loop
-        const matchingRowIndices = []; // Store 0-based row index within the range
-        const lowerCaseExactValue = String(exactValue).toLowerCase(); // Prepare for comparison
-
-        for (let r = 0; r < rangeObj.rowCount; r++) {
-          const cellValue = rangeObj.values[r][relativeColumnIndex];
-          // Check for exact match (case insensitive)
-          const isMatch = cellValue !== null &&
-                       cellValue !== undefined &&
-                       String(cellValue).toLowerCase() === lowerCaseExactValue;
-
-          if (isMatch) {
-            matchingRowIndices.push(r);
-            formattedCount++;
+            return { success: false, error: error.message };
           }
-        }
-
-        if (matchingRowIndices.length > 0) {
-          // 2. Create proxy objects and prepare batch load for entire rows
-          const rowProxies = [];
-          matchingRowIndices.forEach(rowIndex => {
-            const rowRange = rangeObj.getRow(rowIndex);
-            // 3. Load required properties for all matching rows
-            rowRange.load("address");
-            rowRange.format.load("fill/color, font/color, font/bold, font/italic, font/underline");
-            rowProxies.push(rowRange);
-          });
-
-          // 4. Sync once after loading all properties
-          await context.sync();
-
-          // 5. Iterate through loaded proxies, store previous format, apply new format
-          rowProxies.forEach(rowRange => {
-             // Read loaded properties and store for undo
-             affectedRowsUndoData.push({
-               address: rowRange.address,
-               previousFill: rowRange.format.fill.color,
-               previousFontColor: rowRange.format.font.color,
-               previousBold: rowRange.format.font.bold,
-               previousItalic: rowRange.format.font.italic,
-               previousUnderline: rowRange.format.font.underline,
-             });
-
-            // Apply formatting properties to the proxy object
-            if (options.fillColor) {
-              rowRange.format.fill.color = options.fillColor;
-            }
-            if (options.fontColor) {
-              rowRange.format.font.color = options.fontColor;
-            }
-            if (options.bold !== undefined) {
-              rowRange.format.font.bold = options.bold;
-            }
-             if (options.italic !== undefined) {
-              rowRange.format.font.italic = options.italic;
-            }
-             if (options.underline !== undefined) {
-               rowRange.format.font.underline = options.underline === true ? Excel.UnderlineStyle.single : options.underline;
-            }
-          });
-
-          // 6. Sync once at the end to apply all format changes
-          await context.sync();
-
-          // Track operation for undo using the collected data
-          if (excelService) {
-            excelService._trackOperation("formatRowsByExactMatch", {
-              range: rangeObj.address,
-              columnRef,
-              exactValue,
-              options,
-              affectedCells: affectedRowsUndoData // Use the collected data (renamed variable)
-            });
-          }
-        } else {
-           console.log("No matching rows found to format.");
-        }
-
-        resolve({
-          formattedCount,
-          success: true,
-          message: `Applied formatting to ${formattedCount} row(s) where column ${columnRef} exactly matches "${exactValue}" in range ${rangeObj.address}`
-        });
-      }).catch(error => {
-        console.error("Error in formatRowsByExactMatch Excel.run:", error);
-        if (error instanceof OfficeExtension.Error && error.code === "PropertyNotLoaded") {
-             reject({
-               success: false,
-               error: `PropertyNotLoaded: ${error.message}. Ensure properties are loaded before reading.`,
-               details: error
-             });
-        } else {
-             reject({
-               success: false,
-               error: error.message || "Error formatting rows by exact match",
-               details: error
-             });
-        }
-      });
-    } catch (error) {
-       console.error("Outer Error in formatRowsByExactMatch:", error);
-       reject({
-         success: false,
-         error: error.message || "Error setting up formatRowsByExactMatch",
-         details: error
-       });
-    }
-  });
-};
-
-/**
- * Gets unique values from a specified range (e.g., a column or row)
- * @param {string} range - The range to get unique values from (e.g., "A:A" or "B2:B100")
- * @returns {Promise<{success: boolean, uniqueValues?: Array, error?: string}>}
- */
-export const getUniqueValuesInRange = async (range) => {
-  try {
-    let uniqueValues = [];
-    await Excel.run(async (context) => {
-      const sheet = context.workbook.worksheets.getActiveWorksheet();
-      const rangeObj = sheet.getRange(range);
-      rangeObj.load("values");
-      await context.sync();
-      // Flatten the 2D array and filter out empty/nulls
-      const allValues = rangeObj.values.flat().filter(v => v !== null && v !== undefined && v !== "");
-      uniqueValues = [...new Set(allValues)];
-    });
-    return { success: true, uniqueValues };
+        })();
+      `;
+      
+      return await this.execute(code);
   } catch (error) {
-    console.error("Error getting unique values in range:", error);
+      console.error("Error getting selection data:", error);
     return { success: false, error: error.message };
   }
-};
+  }
+
+  /**
+   * Count occurrences of a specific value in a selected range
+   * @param {string} rangeAddress - Range address (e.g., "Sheet1!A1:B10")
+   * @param {string} targetValue - The value to search for
+   * @param {boolean} caseSensitive - Whether the search should be case-sensitive
+   * @param {boolean} skipHeader - Whether to skip the first row (if headers are present)
+   * @returns {Promise<Object>} Count results with locations
+   */
+  async countValueInRange(rangeAddress, targetValue, caseSensitive = false, skipHeader = false) {
+    try {
+      console.log(`Counting "${targetValue}" in range: ${rangeAddress}`);
+      
+      if (!rangeAddress || !targetValue) {
+        return { 
+          success: false, 
+          error: 'Missing required parameters (range address or target value)' 
+        };
+      }
+      
+      // Validate the range exists
+      let isRangeValid = false;
+      let startRowNumber = 1;
+      let startColNumber = 1;
+      let rangeRowCount = 0;
+      let rangeColCount = 0;
+      let rangeValues = [];
+      let rangeBaseAddress = '';
+      try {
+        await Excel.run(async (context) => {
+          const sheet = context.workbook.worksheets.getActiveWorksheet();
+          const testRange = sheet.getRange(rangeAddress);
+          testRange.load(["address", "rowIndex", "columnIndex", "rowCount", "columnCount", "values"]);
+          await context.sync();
+          isRangeValid = true;
+          rangeBaseAddress = testRange.address;
+          startRowNumber = testRange.rowIndex + 1; // Excel is 1-based
+          startColNumber = testRange.columnIndex + 1;
+          rangeRowCount = testRange.rowCount;
+          rangeColCount = testRange.columnCount;
+          rangeValues = testRange.values;
+        });
+      } catch (error) {
+        console.error(`Range validation failed for ${rangeAddress}:`, error);
+        return { 
+          success: false, 
+          error: `The range ${rangeAddress} could not be found or is invalid.` 
+        };
+      }
+      
+      if (!isRangeValid) {
+        return { success: false, error: 'Range validation failed' };
+      }
+      
+      // Helper to convert column index to Excel letters
+      function columnNumberToLetters(num) {
+        let letters = '';
+        while (num > 0) {
+          let mod = (num - 1) % 26;
+          letters = String.fromCharCode(65 + mod) + letters;
+          num = Math.floor((num - mod) / 26);
+        }
+        return letters;
+      }
+      
+      // Execute the count operation
+      let count = 0;
+      let matchedCells = [];
+      const searchFor = String(targetValue);
+      const caseSensitiveFlag = caseSensitive;
+      const targetValueStr = String(searchFor);
+      
+      // Determine start row for iteration
+      const rowStart = skipHeader ? 1 : 0;
+      for (let r = rowStart; r < rangeRowCount; r++) {
+        for (let c = 0; c < rangeColCount; c++) {
+          const cellValue = rangeValues[r][c];
+          if (cellValue === null || cellValue === undefined) continue;
+          const cellValueStr = String(cellValue);
+          const isMatch = caseSensitiveFlag 
+            ? cellValueStr === targetValueStr
+            : cellValueStr.toLowerCase() === targetValueStr.toLowerCase();
+          if (isMatch) {
+            count++;
+            // Calculate cell address
+            const cellRow = startRowNumber + r;
+            const cellCol = startColNumber + c;
+            const colLetter = columnNumberToLetters(cellCol);
+            const cellAddress = `${colLetter}${cellRow}`;
+            matchedCells.push({
+              rowIndex: r,
+              colIndex: c,
+              address: cellAddress,
+              value: cellValue
+            });
+          }
+        }
+      }
+      // If no matches and we're searching for strings, try partial match
+      if (count === 0 && typeof targetValueStr === 'string') {
+        for (let r = rowStart; r < rangeRowCount; r++) {
+          for (let c = 0; c < rangeColCount; c++) {
+            const cellValue = rangeValues[r][c];
+            if (cellValue === null || cellValue === undefined) continue;
+            const cellValueStr = String(cellValue);
+            const contains = caseSensitiveFlag 
+              ? cellValueStr.includes(targetValueStr)
+              : cellValueStr.toLowerCase().includes(targetValueStr.toLowerCase());
+            if (contains) {
+              const cellRow = startRowNumber + r;
+              const cellCol = startColNumber + c;
+              const colLetter = columnNumberToLetters(cellCol);
+              const cellAddress = `${colLetter}${cellRow}`;
+              matchedCells.push({
+                rowIndex: r,
+                colIndex: c,
+                address: cellAddress,
+                value: cellValue,
+                isPartialMatch: true
+              });
+            }
+          }
+        }
+      }
+      return {
+        success: true,
+        count: count,
+        matches: matchedCells,
+        targetValue: targetValue,
+        rangeAddress: rangeAddress,
+        exactMatchCount: matchedCells.filter(m => !m.isPartialMatch).length,
+        partialMatchCount: matchedCells.filter(m => m.isPartialMatch).length
+      };
+    } catch (error) {
+      console.error("Error counting values in range:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get data from a specified range with improved handling to ensure all rows are captured
+   * @param {string} rangeAddress - The range address to get data from
+   * @param {Object} options - Options for data retrieval
+   * @returns {Promise<Object>} The result with the data
+   */
+  async getData(rangeAddress, options = {}) {
+    try {
+      const includeAllRows = options.includeAllRows !== false; // Default to true
+      const preserveTypes = options.preserveTypes !== false; // Default to true
+
+      const code = `
+        return (async () => {
+          try {
+            console.log("Starting Excel.run to get data from range: ${rangeAddress}");
+            
+            let result = {
+              success: false,
+              data: null,
+              rowCount: 0,
+              columnCount: 0
+            };
+            
+            await Excel.run(async (context) => {
+              try {
+                // Get active worksheet
+                const sheet = context.workbook.worksheets.getActiveWorksheet();
+                sheet.load("name");
+                
+                // Get the specified range with full properties loaded
+                const range = sheet.getRange("${rangeAddress}");
+                range.load(["values", "rowCount", "columnCount", "address", "numberFormat"]);
+                
+                // Ensure proper synchronization before reading values
+                await context.sync();
+                
+                console.log("Range loaded: " + range.address);
+                console.log("Range dimensions: " + range.rowCount + " rows × " + range.columnCount + " columns");
+                
+                // Verify we have valid dimensions
+                if (range.rowCount === 0 || range.columnCount === 0) {
+                  throw new Error("Empty range selected: " + range.address);
+                }
+
+                // To ensure we capture all rows, explicitly re-check the range dimensions
+                const fullAddress = range.address;
+                const expandedRange = sheet.getRange(fullAddress);
+                expandedRange.load(["values", "rowCount", "columnCount"]);
+                await context.sync();
+                
+                // Now we have the values from the fully synchronized range
+                const values = expandedRange.values;
+                
+                // Validate the data
+                if (!values || !Array.isArray(values) || values.length === 0) {
+                  throw new Error("No valid data in range: " + fullAddress);
+                }
+                
+                // Post-process the values to ensure data types are preserved if requested
+                let processedValues = values;
+                if (${preserveTypes}) {
+                  // Process values to preserve types (numbers, dates, etc.)
+                  processedValues = values.map(row => {
+                    return row.map(cell => {
+                      // Already a number, boolean, or null - keep as is
+                      if (typeof cell === 'number' || typeof cell === 'boolean' || cell === null) {
+                        return cell;
+                      }
+                      
+                      // Check if string is numeric
+                      if (typeof cell === 'string') {
+                        // Try to convert numeric strings to numbers
+                        const numValue = Number(cell);
+                        if (!isNaN(numValue) && cell.trim() !== '') {
+                          return numValue;
+                        }
+                        
+                        // Check for date strings
+                        const dateValue = new Date(cell);
+                        if (!isNaN(dateValue.getTime()) && 
+                            (cell.includes('-') || cell.includes('/') || cell.includes(','))) {
+                          return dateValue;
+                        }
+                        
+                        // Check if it's a boolean string
+                        if (cell.toLowerCase() === 'true') return true;
+                        if (cell.toLowerCase() === 'false') return false;
+                      }
+                      
+                      return cell;
+                    });
+                  });
+                }
+                
+                // Perform a final verification of data dimensions
+                console.log("Final data dimensions: " + processedValues.length + " rows × " + 
+                           (processedValues[0] ? processedValues[0].length : 0) + " columns");
+                
+                // Set the result
+                result = {
+                  success: true,
+                  data: processedValues,
+                  rowCount: processedValues.length,
+                  columnCount: processedValues[0] ? processedValues[0].length : 0,
+                  address: fullAddress
+                };
+              } catch (innerError) {
+                console.error("Error in Excel.run: " + innerError.message);
+                result.error = innerError.message;
+              }
+            });
+            
+            return result;
+          } catch (error) {
+            console.error("Error in getData: " + error.message);
+            return {
+              success: false,
+              error: error.message
+            };
+          }
+        })();
+      `;
+      
+      return await this.execute(code);
+    } catch (error) {
+      console.error('Error in getData:', error);
+      return {
+        success: false,
+        error: error.message || 'Unknown error getting data'
+      };
+    }
+  }
+}
 
 // Export the service
 const excelService = new ExcelService();

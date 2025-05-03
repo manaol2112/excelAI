@@ -9,18 +9,19 @@ class DataAnalysisService {
   /**
    * Generate a comprehensive data profile for a range
    * @param {string} range Optional range address, uses selected or used range if not provided
+   * @param {object} options Additional options for data analysis
    * @returns {object} Data profile with statistics and insights
    */
-  async generateDataProfile(range = null) {
+  async generateDataProfile(range = null, options = {}) {
     try {
       // Use the middleware to get data with context
-      const rangeContext = await excelMiddleware.extractDataAnalysisContext(range);
+      const rangeContext = await excelMiddleware.extractDataAnalysisContext(range, options);
       
       if (!rangeContext.success) {
         throw new Error(rangeContext.error || "Failed to analyze data");
       }
       
-      const { data, hasHeaders, stats } = rangeContext;
+      const { data, hasHeaders, stats, warnings = [] } = rangeContext;
       
       // Create a cache key based on range and data hash
       const cacheKey = `profile_${range || 'auto'}_${this.hashData(data.data)}`;
@@ -47,14 +48,20 @@ class DataAnalysisService {
         hasHeaders,
         columns: [],
         completeness: stats.nonEmptyCells / (stats.emptyCells + stats.nonEmptyCells),
-        insights: []
+        insights: [],
+        warnings: [...warnings] // propagate warnings
       };
       
       // Analyze each column
       for (let colIndex = 0; colIndex < stats.columnCount; colIndex++) {
         // Extract column data
-        const columnData = analysisData.map(row => row[colIndex]);
+        let columnData = analysisData.map(row => row[colIndex]);
         const dataType = stats.dataTypes[colIndex];
+        
+        // Optionally ignore empty cells in stats
+        if (options.ignoreEmptyCells) {
+          columnData = columnData.filter(cell => cell !== null && cell !== undefined && cell !== '');
+        }
         
         // Get column analysis based on data type
         let columnAnalysis;
@@ -580,6 +587,172 @@ class DataAnalysisService {
         this.cache.delete(key);
       }
     }
+  }
+
+  // Add a method to clear cache manually
+  clearProfileCache() {
+    this.cache.clear();
+  }
+
+  /**
+   * Count rows where a column matches a value (case-insensitive, robust to headers)
+   * @param {string} columnName - The column name to search (case-insensitive)
+   * @param {string|number|boolean} value - The value to match (case-insensitive for strings)
+   * @param {string|null} range - Optional range address
+   * @returns {Promise<{count: number, rowIndices: number[]}>}
+   */
+  async countRowsWithValue(columnName, value, range = null) {
+    const profileResult = await this.generateDataProfile(range);
+    if (!profileResult.success) return { count: 0, rowIndices: [] };
+    const { profile } = profileResult;
+    // Find the column index by name (case-insensitive)
+    const colIndex = profile.columns.findIndex(col => col.name.toLowerCase() === String(columnName).toLowerCase());
+    if (colIndex === -1) return { count: 0, rowIndices: [] };
+    // Get the raw data rows (excluding header if present)
+    const rawData = profile.hasHeaders ? profileResult.profile.hasHeaders ? profileResult.profile.columns[0].nonEmptyCount ? profileResult.profile.columns[0].nonEmptyCount : [] : [] : [];
+    // Instead, get the raw data from the middleware
+    const rangeContext = await excelMiddleware.extractDataAnalysisContext(range);
+    if (!rangeContext.success) return { count: 0, rowIndices: [] };
+    let dataRows = rangeContext.data.data;
+    if (profile.hasHeaders) dataRows = dataRows.slice(1); // skip header row
+    // Now count matches
+    let count = 0;
+    let rowIndices = [];
+    for (let i = 0; i < dataRows.length; i++) {
+      const cell = dataRows[i][colIndex];
+      if (cell === null || cell === undefined) continue;
+      if (typeof value === 'string') {
+        if (String(cell).toLowerCase() === value.toLowerCase()) {
+          count++;
+          rowIndices.push(i + (profile.hasHeaders ? 2 : 1)); // Excel row numbers (1-based, +1 for header)
+        }
+      } else {
+        if (cell === value) {
+          count++;
+          rowIndices.push(i + (profile.hasHeaders ? 2 : 1));
+        }
+      }
+    }
+    return { count, rowIndices };
+  }
+
+  /**
+   * Count rows matching multiple criteria.
+   * @param {Array<{column: string, value: any, op?: string}>} criteria - Array of {column, value, op} (op: '=', '>', '<', etc.)
+   * @param {string|null} range - Optional range address
+   * @returns {Promise<{count: number, rowIndices: number[]}>}
+   */
+  async countRowsWithCriteria(criteria, range = null) {
+    const profileResult = await this.generateDataProfile(range);
+    if (!profileResult.success) return { count: 0, rowIndices: [] };
+    const { profile } = profileResult;
+    const rangeContext = await excelMiddleware.extractDataAnalysisContext(range);
+    if (!rangeContext.success) return { count: 0, rowIndices: [] };
+    let dataRows = rangeContext.data.data;
+    if (profile.hasHeaders) dataRows = dataRows.slice(1);
+    // Map column names to indices
+    const colMap = {};
+    profile.columns.forEach((col, idx) => {
+      colMap[col.name.toLowerCase()] = idx;
+    });
+    let count = 0;
+    let rowIndices = [];
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      let match = true;
+      for (const crit of criteria) {
+        const idx = colMap[crit.column.toLowerCase()];
+        if (idx === undefined) { match = false; break; }
+        const cell = row[idx];
+        if (crit.op === '>' || crit.op === '<' || crit.op === '>=' || crit.op === '<=') {
+          const numCell = parseFloat(cell);
+          const numVal = parseFloat(crit.value);
+          if (isNaN(numCell) || isNaN(numVal)) { match = false; break; }
+          if (crit.op === '>' && !(numCell > numVal)) { match = false; break; }
+          if (crit.op === '<' && !(numCell < numVal)) { match = false; break; }
+          if (crit.op === '>=' && !(numCell >= numVal)) { match = false; break; }
+          if (crit.op === '<=' && !(numCell <= numVal)) { match = false; break; }
+        } else {
+          // Default: equality, case-insensitive for strings
+          if (typeof crit.value === 'string') {
+            if (String(cell).toLowerCase() !== crit.value.toLowerCase()) { match = false; break; }
+          } else {
+            if (cell !== crit.value) { match = false; break; }
+          }
+        }
+      }
+      if (match) {
+        count++;
+        rowIndices.push(i + (profile.hasHeaders ? 2 : 1));
+      }
+    }
+    return { count, rowIndices };
+  }
+
+  /**
+   * Aggregate (sum, avg, min, max) a column, optionally filtered by criteria.
+   * @param {'sum'|'avg'|'min'|'max'} aggType
+   * @param {string} targetColumn
+   * @param {Array<{column: string, value: any, op?: string}>} criteria
+   * @param {string|null} range
+   * @returns {Promise<{result: number|null, count: number, rowIndices: number[]}>}
+   */
+  async aggregateColumnWithCriteria(aggType, targetColumn, criteria = [], range = null) {
+    const profileResult = await this.generateDataProfile(range);
+    if (!profileResult.success) return { result: null, count: 0, rowIndices: [] };
+    const { profile } = profileResult;
+    const rangeContext = await excelMiddleware.extractDataAnalysisContext(range);
+    if (!rangeContext.success) return { result: null, count: 0, rowIndices: [] };
+    let dataRows = rangeContext.data.data;
+    if (profile.hasHeaders) dataRows = dataRows.slice(1);
+    // Map column names to indices
+    const colMap = {};
+    profile.columns.forEach((col, idx) => {
+      colMap[col.name.toLowerCase()] = idx;
+    });
+    const targetIdx = colMap[targetColumn.toLowerCase()];
+    if (targetIdx === undefined) return { result: null, count: 0, rowIndices: [] };
+    let values = [];
+    let rowIndices = [];
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      let match = true;
+      for (const crit of criteria) {
+        const idx = colMap[crit.column.toLowerCase()];
+        if (idx === undefined) { match = false; break; }
+        const cell = row[idx];
+        if (crit.op === '>' || crit.op === '<' || crit.op === '>=' || crit.op === '<=') {
+          const numCell = parseFloat(cell);
+          const numVal = parseFloat(crit.value);
+          if (isNaN(numCell) || isNaN(numVal)) { match = false; break; }
+          if (crit.op === '>' && !(numCell > numVal)) { match = false; break; }
+          if (crit.op === '<' && !(numCell < numVal)) { match = false; break; }
+          if (crit.op === '>=' && !(numCell >= numVal)) { match = false; break; }
+          if (crit.op === '<=' && !(numCell <= numVal)) { match = false; break; }
+        } else {
+          if (typeof crit.value === 'string') {
+            if (String(cell).toLowerCase() !== crit.value.toLowerCase()) { match = false; break; }
+          } else {
+            if (cell !== crit.value) { match = false; break; }
+          }
+        }
+      }
+      if (match) {
+        const val = row[targetIdx];
+        const numVal = parseFloat(val);
+        if (!isNaN(numVal)) {
+          values.push(numVal);
+          rowIndices.push(i + (profile.hasHeaders ? 2 : 1));
+        }
+      }
+    }
+    if (values.length === 0) return { result: null, count: 0, rowIndices: [] };
+    let result = null;
+    if (aggType === 'sum') result = values.reduce((a, b) => a + b, 0);
+    if (aggType === 'avg') result = values.reduce((a, b) => a + b, 0) / values.length;
+    if (aggType === 'min') result = Math.min(...values);
+    if (aggType === 'max') result = Math.max(...values);
+    return { result, count: values.length, rowIndices };
   }
 }
 

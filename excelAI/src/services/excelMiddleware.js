@@ -80,7 +80,7 @@ class ExcelMiddleware {
   }
   
   // Improved data analysis extraction
-  async extractDataAnalysisContext(range) {
+  async extractDataAnalysisContext(range, options = {}) {
     return this.executeOperation(async () => {
       try {
         // Get data for the specified range
@@ -90,7 +90,6 @@ class ExcelMiddleware {
         } else {
           // Try to get selected range first
           const selectedRange = await excelService.getSelectedRange();
-          
           if (selectedRange && selectedRange.success && selectedRange.data.address) {
             rangeData = selectedRange;
           } else {
@@ -98,23 +97,34 @@ class ExcelMiddleware {
             rangeData = await excelService.getAllData();
           }
         }
-        
         if (!rangeData || !rangeData.success) {
           throw new Error("Failed to extract data for analysis");
         }
-        
-        // Get headers if available
-        const hasHeaders = this.detectHeaders(rangeData);
-        
+        // Enhanced header detection
+        let hasHeaders = false;
+        let headerWarning = null;
+        if (typeof options.hasHeaders === 'boolean') {
+          hasHeaders = options.hasHeaders;
+        } else {
+          const detection = this.advancedDetectHeaders(rangeData);
+          hasHeaders = detection.hasHeaders;
+          if (detection.warning) headerWarning = detection.warning;
+        }
         // Extract data summary statistics
         const stats = this.extractDataStats(rangeData);
-        
+        // Add warnings if ambiguous
+        const warnings = [];
+        if (headerWarning) warnings.push(headerWarning);
+        if (stats && stats.dataTypeWarnings && stats.dataTypeWarnings.length) {
+          warnings.push(...stats.dataTypeWarnings);
+        }
         return {
           success: true,
           data: rangeData,
           hasHeaders,
           stats,
-          range: rangeData.address || "Unknown range"
+          range: rangeData.address || "Unknown range",
+          warnings
         };
       } catch (error) {
         console.error("Error extracting data analysis context:", error);
@@ -126,79 +136,82 @@ class ExcelMiddleware {
     });
   }
   
-  // Detect if data has headers based on data patterns
-  detectHeaders(rangeData) {
+  // Advanced header detection with uniqueness and string ratio
+  advancedDetectHeaders(rangeData) {
     if (!rangeData || !rangeData.data || rangeData.data.length === 0) {
-      return false;
+      return { hasHeaders: false };
     }
-    
     const firstRow = rangeData.data[0];
-    
-    // Check if first row contains all strings while other rows have numeric values
-    const firstRowAllStrings = firstRow.every(cell => typeof cell === 'string');
-    
-    if (firstRowAllStrings && rangeData.data.length > 1) {
-      const secondRow = rangeData.data[1];
-      const secondRowHasNumbers = secondRow.some(cell => 
-        typeof cell === 'number' || (typeof cell === 'string' && !isNaN(parseFloat(cell)))
-      );
-      
-      if (secondRowHasNumbers) {
-        return true;
+    const rowCount = rangeData.data.length;
+    let warning = null;
+    // If all strings and unique, likely headers
+    const allStrings = firstRow.every(cell => typeof cell === 'string');
+    const uniqueCount = new Set(firstRow).size;
+    if (allStrings && uniqueCount === firstRow.length) {
+      // Check if next row is mostly numbers or not strings
+      if (rowCount > 1) {
+        const secondRow = rangeData.data[1];
+        const secondRowNumeric = secondRow.filter(cell => typeof cell === 'number' || (typeof cell === 'string' && !isNaN(parseFloat(cell)))).length;
+        if (secondRowNumeric > firstRow.length / 2) {
+          return { hasHeaders: true };
+        }
       }
+      // If only one row, ambiguous
+      warning = 'Header detection ambiguous: only one row present.';
+      return { hasHeaders: true, warning };
     }
-    
-    // Check for special header formatting (could be enhanced with formatting info)
-    return false;
+    // If >60% of first row are strings and unique, likely headers
+    const stringCount = firstRow.filter(cell => typeof cell === 'string').length;
+    if (stringCount / firstRow.length > 0.6 && uniqueCount === firstRow.length) {
+      return { hasHeaders: true };
+    }
+    // If not unique, warn
+    if (allStrings && uniqueCount < firstRow.length) {
+      warning = 'Header detection ambiguous: first row has duplicate values.';
+      return { hasHeaders: false, warning };
+    }
+    // Fallback: not headers
+    return { hasHeaders: false };
   }
   
-  // Extract basic statistics about the data
+  // Enhanced data type detection with dominant type threshold and warnings
   extractDataStats(rangeData) {
     if (!rangeData || !rangeData.data || rangeData.data.length === 0) {
       return null;
     }
-    
     const stats = {
       rowCount: rangeData.data.length,
       columnCount: rangeData.data[0].length,
       dataTypes: [],
       emptyCells: 0,
-      nonEmptyCells: 0
+      nonEmptyCells: 0,
+      dataTypeWarnings: []
     };
-    
-    // Analyze each column
     for (let colIndex = 0; colIndex < stats.columnCount; colIndex++) {
       const columnData = rangeData.data.map(row => row[colIndex]);
-      
-      // Count non-empty cells in this column
-      const nonEmptyCount = columnData.filter(cell => 
-        cell !== null && cell !== undefined && cell !== ''
-      ).length;
-      
-      // Detect data type for this column
-      let columnType = 'mixed';
-      
-      const numericCount = columnData.filter(cell => 
-        typeof cell === 'number' || (typeof cell === 'string' && !isNaN(parseFloat(cell)) && cell.trim() !== '')
-      ).length;
-      
-      const dateCount = columnData.filter(cell =>
-        cell instanceof Date || (typeof cell === 'string' && !isNaN(Date.parse(cell)))
-      ).length;
-      
-      if (numericCount > 0.7 * nonEmptyCount) {
-        columnType = 'numeric';
-      } else if (dateCount > 0.7 * nonEmptyCount) {
-        columnType = 'date';
-      } else if (nonEmptyCount > 0) {
-        columnType = 'text';
+      const nonEmptyCount = columnData.filter(cell => cell !== null && cell !== undefined && cell !== '').length;
+      // Count types
+      let num = 0, date = 0, text = 0;
+      for (const cell of columnData) {
+        if (cell === null || cell === undefined || cell === '') continue;
+        if (typeof cell === 'number' || (typeof cell === 'string' && !isNaN(parseFloat(cell)) && cell.trim() !== '')) num++;
+        else if (cell instanceof Date || (typeof cell === 'string' && !isNaN(Date.parse(cell)))) date++;
+        else text++;
       }
-      
+      let columnType = 'mixed';
+      const maxType = Math.max(num, date, text);
+      if (maxType / (nonEmptyCount || 1) > 0.6) {
+        if (num === maxType) columnType = 'numeric';
+        else if (date === maxType) columnType = 'date';
+        else if (text === maxType) columnType = 'text';
+      }
+      if (columnType === 'mixed' && maxType > 0) {
+        stats.dataTypeWarnings.push(`Column ${colIndex + 1} is mixed but has a dominant type: ${num >= date && num >= text ? 'numeric' : date >= text ? 'date' : 'text'}`);
+      }
       stats.dataTypes.push(columnType);
       stats.emptyCells += (stats.rowCount - nonEmptyCount);
       stats.nonEmptyCells += nonEmptyCount;
     }
-    
     return stats;
   }
 }

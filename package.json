@@ -8,5 +8,10 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
-} 
+  "license": "ISC",
+  "dependencies": {
+    "@fluentui/react-components": "^9.63.0",
+    "openai": "^4.96.2",
+    "uuid": "^11.1.0"
+  }
+}
