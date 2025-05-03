@@ -3159,6 +3159,48 @@ class ExcelService {
       };
     }
   }
+
+  /**
+   * Selects the used range in the active worksheet
+   * @returns {Promise<Object>} - A promise that resolves with the selection result
+   */
+  async selectUsedRange() {
+    try {
+      let result = {};
+      
+      await Excel.run(async (context) => {
+        const sheet = context.workbook.worksheets.getActiveWorksheet();
+        const usedRange = sheet.getUsedRange();
+        
+        // Load properties to check if the used range exists
+        usedRange.load(["address", "rowCount", "columnCount"]);
+        await context.sync();
+        
+        // Check if the worksheet has any data
+        if (!usedRange.address || usedRange.rowCount === 0 || usedRange.columnCount === 0) {
+          return { success: false, error: "No data found in the worksheet" };
+        }
+        
+        // Select the used range
+        usedRange.select();
+        
+        // Store result for return
+        result = {
+          address: usedRange.address,
+          rowCount: usedRange.rowCount,
+          columnCount: usedRange.columnCount
+        };
+        
+        await context.sync();
+      });
+      
+      console.log("Successfully selected used range:", result);
+      return { success: true, data: result };
+    } catch (error) {
+      console.error("Error selecting used range:", error);
+      return { success: false, error: error.message };
+    }
+  }
 }
 
 // Export the service

@@ -425,6 +425,28 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     gap: "8px"
   },
+  
+  statusMessage: {
+    position: "fixed",
+    bottom: "140px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForeground1BrandSelected,
+    borderRadius: "16px",
+    padding: "8px 16px",
+    boxShadow: tokens.shadow16,
+    zIndex: 1000,
+    animation: "fadeInOut 0.3s ease",
+    maxWidth: "80%",
+    textAlign: "center",
+    fontSize: tokens.fontSizeBase200
+  },
+  
+  "@keyframes fadeInOut": {
+    "0%": { opacity: 0, transform: "translate(-50%, 20px)" },
+    "100%": { opacity: 1, transform: "translate(-50%, 0)" }
+  },
 });
 
 // View Data Button Component
@@ -824,7 +846,10 @@ export default function AIChat() {
     countValueInRange,
     analyzeColumnData,
     answerDataQuestion,
-    excelService
+    excelService,
+    getExcelContext,
+    abortAnalysis,
+    checkApiKey
   } = useAI();
   
   // Local state
@@ -838,6 +863,8 @@ export default function AIChat() {
   const [useSelection, setUseSelection] = useState(false);
   const [selectionData, setSelectionData] = useState(null);
   const [openAIJsonData, setOpenAIJsonData] = useState(null); // Store OpenAI JSON data
+  const [loading, setLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState(null);
   
   // References
   const messagesEndRef = useRef(null);
@@ -904,7 +931,7 @@ export default function AIChat() {
         if (context && context.selection && context.selection.address) {
           setCurrentSelection(context.selection);
           setUseSelection(true);
-              } else {
+        } else {
           // No active selection, show message
           addMessage({
             role: 'assistant',
@@ -913,7 +940,7 @@ export default function AIChat() {
             timestamp: new Date().toISOString()
           });
         }
-        } else {
+      } else {
         // Turn off selection mode
         setUseSelection(false);
       }
@@ -1594,7 +1621,7 @@ export default function AIChat() {
                             enrichedContext += `\n\nVerification for column "${column}":\n`;
                             enrichedContext += data.countBreakdown.join("\n");
                           }
-                    });
+                        });
                   }
                 } catch (error) {
                   console.error("Error converting data to JSON:", error);
@@ -1826,13 +1853,13 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
           console.log("Storing OpenAI data for viewer with", jsonData.length, "rows and", headers.length, "columns");
           console.log("Sample data:", JSON.stringify(jsonData.slice(0, 2)));
           setOpenAIJsonData(openAIPromptPackage);
-        } else {
+          } else {
           console.warn("Failed to extract or create JSON data for OpenAI viewer");
-        }
-      } catch (error) {
+          }
+        } catch (error) {
         console.error("Error saving OpenAI prompt data:", error);
       }
-
+      
       // Skip all the direct counting/analysis approaches and go straight to OpenAI with enriched context
       console.log("Using OpenAI as primary analysis engine with enriched context");
       
@@ -2479,6 +2506,42 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
     }
   };
 
+  // Auto-select used range
+  const handleAutoSelectRange = async () => {
+    try {
+      setLoading(true);
+      setStatusMessage("Auto-selecting used range...");
+
+      // Call the selectUsedRange method from the excelService
+      const result = await excelService.selectUsedRange();
+      
+      if (result.success) {
+        // Update UI to show selection is active
+        setUseSelection(true);
+        
+        // Update the current selection with the result
+        setCurrentSelection(result.data);
+        
+        // Refresh the selection data
+        await refreshSelectionData();
+        
+        // Show a success message
+        setStatusMessage(`Selected ${result.data.rowCount} rows x ${result.data.columnCount} columns`);
+        setTimeout(() => setStatusMessage(null), 3000);
+      } else {
+        // If there was an error, show it
+        setStatusMessage(`Error: ${result.error || 'Failed to select used range'}`);
+        setTimeout(() => setStatusMessage(null), 3000);
+      }
+    } catch (error) {
+      console.error("Error auto-selecting used range:", error);
+      setStatusMessage(`Error: ${error.message || 'Failed to select used range'}`);
+      setTimeout(() => setStatusMessage(null), 3000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className={classes.root}>
       <div className={classes.chatContainer}>
@@ -2500,7 +2563,15 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
           disabled={isProcessing || processingAction}
           currentSelection={useSelection ? currentSelection : null}
           onToggleSelection={handleToggleSelection}
+          onAutoSelectRange={handleAutoSelectRange}
         />
+        
+        {/* Status message pop-up */}
+        {statusMessage && (
+          <div className={classes.statusMessage}>
+            {statusMessage}
+          </div>
+        )}
       </div>
       
       {/* Data View Button (only shown when selection is active) */}

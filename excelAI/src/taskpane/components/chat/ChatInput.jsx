@@ -16,7 +16,8 @@ import {
   DocumentSearch24Regular,
   Table24Regular,
   TableSimple24Filled,
-  DataBarVertical24Filled
+  DataBarVertical24Filled,
+  FullScreenMaximize24Regular
 } from "@fluentui/react-icons";
 
 const useStyles = makeStyles({
@@ -237,6 +238,20 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
   },
+  autoSelectButton: {
+    color: tokens.colorNeutralForeground3,
+    width: "32px",
+    height: "32px",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: "4px",
+    transition: "all 0.2s ease",
+    "&:hover": {
+      backgroundColor: tokens.colorNeutralBackground3,
+      color: tokens.colorBrandForeground1,
+    }
+  },
   "@keyframes pulseEffect": {
     "0%": { opacity: 0.8, transform: "scale(1)" },
     "50%": { opacity: 1, transform: "scale(1.05)" },
@@ -246,7 +261,7 @@ const useStyles = makeStyles({
 
 const MAX_CHARS = 10000;
 
-const ChatInput = ({ value = '', onChange, onKeyDown, onSend, disabled, currentSelection, onToggleSelection }) => {
+const ChatInput = ({ value = '', onChange, onKeyDown, onSend, disabled, currentSelection, onToggleSelection, onAutoSelectRange }) => {
   const styles = useStyles();
   const [isFocused, setIsFocused] = useState(false);
   const textareaRef = useRef(null);
@@ -294,6 +309,12 @@ const ChatInput = ({ value = '', onChange, onKeyDown, onSend, disabled, currentS
   const handleToggleSelection = () => {
     if (onToggleSelection) {
       onToggleSelection();
+    }
+  };
+  
+  const handleAutoSelectRange = () => {
+    if (onAutoSelectRange) {
+      onAutoSelectRange();
     }
   };
   
@@ -359,6 +380,16 @@ const ChatInput = ({ value = '', onChange, onKeyDown, onSend, disabled, currentS
                 icon={hasActiveSelection ? <DataBarVertical24Filled /> : <TableSimple24Filled />}
                 onClick={handleToggleSelection}
                 aria-label={hasActiveSelection ? "Disable Excel selection" : "Use Excel selection"}
+              />
+            </Tooltip>
+            
+            <Tooltip content="Auto-select all data (used range)" relationship="label">
+              <Button
+                className={styles.autoSelectButton}
+                appearance="subtle"
+                icon={<FullScreenMaximize24Regular />}
+                onClick={handleAutoSelectRange}
+                aria-label="Auto-select used range"
               />
             </Tooltip>
             
