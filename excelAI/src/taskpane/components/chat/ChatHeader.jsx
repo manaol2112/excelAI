@@ -21,6 +21,7 @@ import {
   DeleteRegular,
   ChatRegular
 } from "@fluentui/react-icons";
+import { AI_MODES } from "../AIChat";
 
 const useStyles = makeStyles({
   chatHeader: {
@@ -81,13 +82,6 @@ const useStyles = makeStyles({
   }
 });
 
-// AI operation modes
-const AI_MODES = {
-  ASK: { name: "Ask Mode", description: "Get answers in chat without modifying your spreadsheet" },
-  AGENT: { name: "Agent Mode", description: "AI will directly apply changes to your spreadsheet" },
-  PROMPT: { name: "Prompt Mode", description: "Ask permission before applying changes" }
-};
-
 const ChatHeader = ({ 
   mode, 
   onModeChange, 
@@ -138,7 +132,7 @@ const ChatHeader = ({
           <MenuTrigger disableButtonEnhancement>
             <div className={styles.modeSelector}>
               <AppsAddIn24Regular />
-              <Text>{AI_MODES[mode.key].name}</Text>
+              <Text>{mode.text}</Text>
               <ChevronDown20Regular />
             </div>
           </MenuTrigger>
@@ -148,21 +142,21 @@ const ChatHeader = ({
                 onClick={() => onModeChange(AI_MODES.ASK)}
                 icon={mode.key === "ASK" ? <Badge appearance="filled" /> : null}
               >
-                {AI_MODES.ASK.name}
+                {AI_MODES.ASK.text}
                 <Text size={100} block>{AI_MODES.ASK.description}</Text>
               </MenuItem>
               <MenuItem 
                 onClick={() => onModeChange(AI_MODES.AGENT)}
                 icon={mode.key === "AGENT" ? <Badge appearance="filled" /> : null}
               >
-                {AI_MODES.AGENT.name}
+                {AI_MODES.AGENT.text}
                 <Text size={100} block>{AI_MODES.AGENT.description}</Text>
               </MenuItem>
               <MenuItem 
                 onClick={() => onModeChange(AI_MODES.PROMPT)}
                 icon={mode.key === "PROMPT" ? <Badge appearance="filled" /> : null}
               >
-                {AI_MODES.PROMPT.name}
+                {AI_MODES.PROMPT.text}
                 <Text size={100} block>{AI_MODES.PROMPT.description}</Text>
               </MenuItem>
             </MenuList>

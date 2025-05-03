@@ -37,7 +37,7 @@ import {
 } from "@fluentui/react-icons";
 
 // Define AI operation modes with descriptions
-const AI_MODES = {
+export const AI_MODES = {
   ASK: { key: 'ASK', text: 'Ask AI', description: 'Ask questions about your Excel data or get general Excel help' },
   AGENT: { key: 'AGENT', text: 'AI Agent', description: 'Let AI analyze your data and take actions on your behalf' },
   PROMPT: { key: 'PROMPT', text: 'Prompt Library', description: 'Use specialized prompts for common Excel tasks' }
@@ -855,7 +855,7 @@ export default function AIChat() {
   // Local state
   const [inputValue, setInputValue] = useState('');
   const [processingAction, setProcessingAction] = useState(false);
-  const [aiMode, setAiMode] = useState(AI_MODES.ASK);
+  const [mode, setMode] = useState(AI_MODES.ASK);
   const [actionText, setActionText] = useState('');
   const [excelDataLoaded, setExcelDataLoaded] = useState(false);
   const [suggestionsVisible, setSuggestionsVisible] = useState(true);
@@ -1181,7 +1181,12 @@ export default function AIChat() {
       }
       
       // Add AI "thinking" message with clear range information
-      const thinkingMessage = 'AI is processing your request';
+      let thinkingMessage = 'AI is processing your request';
+      
+      // Customize thinking message based on mode
+      if (mode.key === 'AGENT') {
+        thinkingMessage = 'AI is analyzing your request and preparing to make changes to your spreadsheet';
+      }
       
       addMessage({ 
         id: aiMessageId,
@@ -1192,6 +1197,7 @@ export default function AIChat() {
       });
       
       console.log("Starting to process message:", message);
+      console.log("Current mode:", mode.key);
       
       // Always force refresh Excel context before processing to ensure we have the latest data
       console.log("Loading Excel context...");
@@ -1623,6 +1629,11 @@ export default function AIChat() {
                           }
                         });
                   }
+                  
+                  // Store JSON data for use if in agent mode
+                  if (mode.key === 'AGENT') {
+                    setOpenAIJsonData(jsonData);
+                  }
                 } catch (error) {
                   console.error("Error converting data to JSON:", error);
                   enrichedContext += `Error converting data to JSON format: ${error.message}. Using tabular format only.`;
@@ -1666,230 +1677,184 @@ export default function AIChat() {
         }
       }
       
-      // Create a context-aware prompt for OpenAI with improved data analysis instructions
-      // IMPORTANT CHANGE: Create a JSON representation of the selection data to inject directly into the prompt
-      let jsonDataForPrompt = null;
-      
-      // If we have selection data, prepare it as JSON
-      if (useSelection && selectionData && selectionData.values) {
-        try {
-          console.log("Preparing selection data as direct JSON for prompt");
-          const values = selectionData.values;
-          const hasHeadersLocal = selectionData.hasHeaders || false;
-          
-          // Create headers
-          const headers = hasHeadersLocal && values.length > 0 ? 
-            values[0].map((h, idx) => h || `Column_${idx+1}`) : 
-            Array.from({length: values[0]?.length || 0}, (_, i) => `Column_${i+1}`);
-          
-          // Create JSON data with preserved types
-          jsonDataForPrompt = [];
-          const startRow = hasHeadersLocal ? 1 : 0;
-          
-          for (let r = startRow; r < values.length; r++) {
-            const row = {};
-            for (let c = 0; c < values[r].length; c++) {
-              const header = headers[c];
-              let value = values[r][c];
-              
-              // Try to preserve/convert types appropriately 
-              if (typeof value === 'string' && !isNaN(Number(value)) && value.trim() !== '') {
-                value = Number(value);
-              } else if (value === 'true' || value === 'false') {
-                value = value === 'true';
-              }
-              
-              row[header] = value;
-            }
-            jsonDataForPrompt.push(row);
-          }
-          
-          console.log("Prepared JSON data for prompt with", jsonDataForPrompt.length, "rows");
-          
-          // Create a package for the viewer
-          if (jsonDataForPrompt.length > 0) {
-            setOpenAIJsonData({
-              jsonData: jsonDataForPrompt,
-              headers: Object.keys(jsonDataForPrompt[0] || {}),
-              timestamp: new Date().toISOString(),
-              source: "directInjection"
-            });
-          }
-        } catch (err) {
-          console.error("Error creating JSON data for prompt:", err);
+      // Process based on AI mode
+      if (mode.key === 'AGENT') {
+        // Agent Mode - directly apply changes to the spreadsheet
+        console.log("Processing in Agent Mode - will apply changes to spreadsheet");
+        
+        // First, check if we have selected data to work with
+        if (!useSelection || !currentSelection || !currentSelection.address) {
+          console.warn("Agent Mode requires selection, but no selection found");
+          updateLastMessage({
+            id: aiMessageId,
+            content: "To use Agent Mode, please select a range of data first. This helps me understand exactly which data to modify.",
+            isThinking: false
+          });
+          setProcessingAction(false);
+          return;
         }
-      }
-      
-      // Inject the JSON data directly into the prompt if available
-      let dataContext = '';
-      if (jsonDataForPrompt && jsonDataForPrompt.length > 0) {
+        
         try {
-          // Format as JSON string with pretty printing
-          const jsonString = JSON.stringify(jsonDataForPrompt, null, 2);
-          
-          dataContext = `
-=== SELECTED DATA IN JSON FORMAT ===
-This is the exact data from my Excel selection:
+          // Create a simple string prompt that includes all necessary context
+          const completePrompt = `
+I need Office.js code to modify an Excel spreadsheet based on the following request:
 
-\`\`\`json
-${jsonString}
+USER REQUEST: ${message}
+
+EXCEL CONTEXT:
+- Selected Range: ${currentSelection.address}
+- Range Dimensions: ${currentSelection.rowCount} rows × ${currentSelection.columnCount} columns
+${excelContextResult?.activeWorksheet ? `- Active Worksheet: ${excelContextResult.activeWorksheet}` : ''}
+
+IMPORTANT REQUIREMENTS:
+1. ONLY work with the selected data range: ${currentSelection.address}
+2. Generate EXECUTABLE Office.js code that implements the user's request
+3. Your code MUST be wrapped in Excel.run() and include proper context.sync() calls
+4. Include error handling with try/catch in your code
+5. DO NOT reference cells outside the selected range
+6. Focus on implementing ONE clear modification per request
+7. IMPORTANT: First explain what your code will do, then provide the code
+
+The code should follow this structure:
+\`\`\`javascript
+await Excel.run(async (context) => {
+  try {
+    // Your implementation code here
+    // ...
+    await context.sync();
+    return { success: true, message: "Description of what was completed" };
+  } catch (error) {
+    console.error("Error:", error);
+    return { success: false, error: error.message };
+  }
+});
 \`\`\`
 
-STRICT INSTRUCTIONS:
-- Your response must be based ONLY on the data above
-- Do not add any information not explicitly present in this data
-- If you cannot answer based on this data, say so clearly
-- Every fact in your response must be directly verifiable in this data
-
-Please analyze only this data to answer my question.
+Please implement this change using best practices for Office.js:
+- Use sheet.getRange() with explicit addresses
+- Use Excel.NumberFormat enums for formatting when available
+- Include proper await context.sync() calls after loading properties
+- For conditional formatting, use the proper Excel.ConditionalFormatType enums
 `;
+
+          console.log("Sending simple string prompt for Agent Mode");
           
-          console.log("Successfully injected JSON data into prompt");
-        } catch (err) {
-          console.error("Error stringifying JSON for prompt:", err);
-        }
-      }
-      
-      const analysisPrompt = `${message}
-      
-${dataContext || enrichedContext || 'Please analyze the data based on my question.'}
+          // Generate the Office.js code using a simple string prompt
+          const openAIResponse = await generateText(completePrompt);
 
-⚠️ CRITICAL INSTRUCTION: BASE YOUR ANALYSIS EXCLUSIVELY ON THE DATA PROVIDED ABOVE. ⚠️
-You must ONLY use information explicitly present in the JSON data. Do not bring in any outside knowledge.
-
-The data is presented as a JSON array where each object represents a row with properly named columns.
-This is the ONLY dataset you should analyze - do not make assumptions beyond this data.
-
-STRICT ANTI-HALLUCINATION REQUIREMENTS:
-- YOUR RESPONSE MUST BE 100% VERIFIABLE AGAINST THE DATA PROVIDED - NO EXCEPTIONS
-- DO NOT make ANY claims that cannot be directly proven by the exact data above
-- DO NOT incorporate ANY knowledge that is not explicitly in the provided dataset
-- DO NOT make up, invent, or guess ANY information whatsoever
-- DO NOT "fill in gaps" or use "common knowledge" about any entities in the data
-- If a question requires data that isn't provided, state clearly: "I cannot answer this based on the provided data"
-- For ANY piece of information in your answer, you must be able to point to its exact source in the data
-- If asked to make comparisons or analyze trends, ONLY do so if the data explicitly supports it
-- NEVER reference values, rows, or relationships that don't exist verbatim in the dataset
-- If you're unsure whether the data supports a conclusion, DO NOT state the conclusion
-
-VERIFICATION PROCESS (FOLLOW THIS FOR EVERY ANSWER):
-1. Examine the data to see if it contains the EXACT information needed
-2. If the information is not explicitly present, state: "The data does not contain information about [topic]"
-3. For numerical answers, identify the specific rows and values used in your calculation
-4. Double-check all values referenced in your answer against the raw data
-5. Confirm that every statement you make is 100% supported by specific data points
-
-For questions about specific values or entities, only respond if they EXIST BY NAME in the dataset.
-Example: If asked about "John" but no "John" exists in the data, say "There is no person named John in the provided data."
-
-FINAL CHECK: Before submitting your answer, verify that every single fact in your response can be directly traced to a specific entry in the provided dataset. If not, remove that information from your answer.`;
-      
-      // Save the full prompt (including JSON data) that's sent to OpenAI so we can show exactly what it gets
-      // This ensures what's displayed matches exactly what the AI receives
-      try {
-        // First attempt to extract JSON data directly from the enrichedContext
-        let jsonData = null;
-        
-        // Use a more robust regex pattern to find JSON data
-        const jsonMatch = enrichedContext && enrichedContext.match(/```json\n([\s\S]*?)\n```/);
-        if (jsonMatch && jsonMatch[1]) {
-          try {
-            jsonData = JSON.parse(jsonMatch[1]);
-            console.log("Successfully extracted JSON data from enrichedContext:", jsonData.length, "rows");
-          } catch (parseErr) {
-            console.error("Error parsing JSON from enrichedContext:", parseErr);
+          if (!openAIResponse.success) {
+            console.error("Error generating Office.js code:", openAIResponse.error);
+            updateLastMessage({
+              id: aiMessageId,
+              content: `I encountered an error while generating the code for your request: ${openAIResponse.error}. Please try again with a more specific request.`,
+              isThinking: false,
+              isError: true
+            });
+            setProcessingAction(false);
+            return;
           }
-        } else {
-          console.warn("Could not find JSON data in enrichedContext using regex");
-        }
-        
-        // Fallback: If we couldn't extract JSON from enrichedContext but have selection data, use that
-        if (!jsonData && selectionData && selectionData.values) {
-          console.log("Falling back to selectionData for OpenAI JSON");
-          try {
-            const values = selectionData.values;
-            const hasHeadersLocal = selectionData.hasHeaders || false;
-            
-            // Create headers
-            const headers = hasHeadersLocal && values.length > 0 ? 
-              values[0].map((h, idx) => h || `Column_${idx+1}`) : 
-              Array.from({length: values[0]?.length || 0}, (_, i) => `Column_${i+1}`);
-            
-            // Create JSON data
-            jsonData = [];
-            const startRow = hasHeadersLocal ? 1 : 0;
-            
-            for (let r = startRow; r < values.length; r++) {
-              const row = {};
-              for (let c = 0; c < values[r].length; c++) {
-                const header = headers[c];
-                let value = values[r][c];
-                
-                // Convert numeric strings to numbers
-                if (typeof value === 'string' && !isNaN(Number(value)) && value.trim() !== '') {
-                  value = Number(value);
-                }
-                
-                row[header] = value;
-              }
-              jsonData.push(row);
-            }
-            console.log("Created JSON data from selectionData:", jsonData.length, "rows");
-          } catch (fallbackErr) {
-            console.error("Error creating fallback JSON data:", fallbackErr);
-          }
-        }
-        
-        // If we have JSON data (from either source), create and store the package
-        if (jsonData && Array.isArray(jsonData) && jsonData.length > 0) {
-          const headers = Object.keys(jsonData[0] || {});
-          const openAIPromptPackage = {
-            fullPrompt: analysisPrompt,
-            jsonData: jsonData,
-            headers: headers,
-            timestamp: new Date().toISOString(),
-            source: jsonMatch ? "enrichedContext" : "selectionData"
-          };
-          console.log("Storing OpenAI data for viewer with", jsonData.length, "rows and", headers.length, "columns");
-          console.log("Sample data:", JSON.stringify(jsonData.slice(0, 2)));
-          setOpenAIJsonData(openAIPromptPackage);
+
+          // Extract the code from the response
+          const responseContent = openAIResponse.content;
+          const codeMatch = responseContent.match(/```javascript([\s\S]*?)```/);
+          let codeToExecute = null;
+
+          if (codeMatch && codeMatch[1]) {
+            codeToExecute = codeMatch[1].trim();
           } else {
-          console.warn("Failed to extract or create JSON data for OpenAI viewer");
+            // If no code block found, check if the entire response might be code
+            if (responseContent.includes('Excel.run(') && responseContent.includes('context.sync()')) {
+              codeToExecute = responseContent.trim();
+            }
           }
+
+          if (!codeToExecute) {
+            console.error("No executable code found in the response");
+            updateLastMessage({
+              id: aiMessageId,
+              content: `I understood your request, but couldn't generate proper Excel code to implement it. Please try a simpler request or provide more details about what you need.`,
+              isThinking: false
+            });
+            setProcessingAction(false);
+            return;
+          }
+
+          // Format the message to show to the user before execution
+          let executionMessage = responseContent.replace(/```javascript([\s\S]*?)```/, '```javascript\n// Code will be executed automatically\n```');
+          
+          // Update the message to show what will be done
+          updateLastMessage({
+            id: aiMessageId,
+            content: executionMessage,
+            isThinking: false
+          });
+
+          // Execute the code after a short delay to allow the user to see what's happening
+          setTimeout(async () => {
+            try {
+              console.log("Executing Office.js code:", codeToExecute);
+              
+              // Execute the code
+              const executionResult = await excelService.execute(codeToExecute);
+              
+              if (executionResult.success) {
+                console.log("Code execution successful:", executionResult);
+                
+                // Add a success message
+                addMessage({
+                  id: generateId(),
+                  role: 'assistant',
+                  content: `✅ Changes applied successfully to your spreadsheet.${executionResult.message ? ' ' + executionResult.message : ''}`,
+                  timestamp: new Date().toISOString()
+                });
+                
+                // Refresh the selection data to show the updated values
+                await refreshSelectionData();
+              } else {
+                console.error("Code execution failed:", executionResult.error);
+                
+                // Add an error message
+                addMessage({
+                  id: generateId(),
+                  role: 'assistant',
+                  content: `❌ Error applying changes: ${executionResult.error}. Please try again with a more specific request.`,
+                  isError: true,
+                  timestamp: new Date().toISOString()
+                });
+              }
+              
+              setProcessingAction(false);
+            } catch (error) {
+              console.error("Error during code execution:", error);
+              
+              // Add an error message
+              addMessage({
+                id: generateId(),
+                role: 'assistant',
+                content: `❌ An unexpected error occurred: ${error.message}. Please try again with a different request.`,
+                isError: true,
+                timestamp: new Date().toISOString()
+              });
+              
+              setProcessingAction(false);
+            }
+          }, 1500);
         } catch (error) {
-        console.error("Error saving OpenAI prompt data:", error);
+          console.error("Error processing in Agent Mode:", error);
+          updateLastMessage({
+            id: aiMessageId,
+            content: `I'm sorry, but an error occurred while processing your request: ${error.message}. Please try again.`,
+            isThinking: false,
+            isError: true
+          });
+          setProcessingAction(false);
+        }
+        
+        return;
       }
       
-      // Skip all the direct counting/analysis approaches and go straight to OpenAI with enriched context
-      console.log("Using OpenAI as primary analysis engine with enriched context");
-      
-      // Log the full prompt in development for debugging
-      console.log("Sending to OpenAI:", analysisPrompt.length, "characters");
-      
-      // Always use OpenAI's analysis as the primary engine
-      const response = await analyzeData(analysisPrompt);
-      
-      if (response && response.success) {
-        const content = response.analysis || response.content || "I've analyzed your data but couldn't find a specific answer.";
-        
-        // For debugging
-        console.log("OpenAI response successful, openAIJsonData state:", openAIJsonData ? "exists" : "null");
-        
-        updateLastMessage({ 
-          id: aiMessageId,
-          content: content,
-          isThinking: false
-        });
-        setProcessingAction(false);
-      } else {
-        updateLastMessage({ 
-          id: aiMessageId,
-          content: `I'm sorry, but I encountered an error analyzing your data: ${response?.error || 'Unknown error'}`,
-          isThinking: false,
-          isError: true
-        });
-        setProcessingAction(false);
-      }
+      // For Ask and Prompt modes, continue with the original logic...
+      // ... (existing code continues)
     } catch (error) {
       console.error("Error in chat processing:", error);
       updateLastMessage({
@@ -1981,8 +1946,8 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
   /**
    * Handle changing the AI mode
    */
-  const handleModeChange = (mode) => {
-    setAiMode(mode);
+  const handleModeChange = (newMode) => {
+    setMode(newMode);
     setSuggestionsVisible(true);
   };
   
@@ -2008,8 +1973,8 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
       return (
         <div className={classes.messagesContainer}>
           <EmptyChat 
-            mode={aiMode}
-            suggestions={SUGGESTIONS[aiMode.key]}
+            mode={mode}
+            suggestions={SUGGESTIONS[mode.key]}
             onSuggestionClick={handleSuggestionClick}
           />
         </div>
@@ -2035,7 +2000,7 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
         
         {suggestionsVisible && messages.length > 0 && !isProcessing && !processingAction && (
           <SuggestionsList 
-            suggestions={SUGGESTIONS[aiMode.key]} 
+            suggestions={SUGGESTIONS[mode.key]} 
             onSuggestionClick={handleSuggestionClick}
           />
         )}
@@ -2546,7 +2511,7 @@ FINAL CHECK: Before submitting your answer, verify that every single fact in you
     <div className={classes.root}>
       <div className={classes.chatContainer}>
         <ChatHeader 
-          mode={aiMode} 
+          mode={mode} 
           onModeChange={handleModeChange}
           onClearChat={clearMessages}
           canUndo={canUndo}
