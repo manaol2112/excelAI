@@ -1854,7 +1854,44 @@ Please implement this change using best practices for Office.js:
       }
       
       // For Ask and Prompt modes, continue with the original logic...
-      // ... (existing code continues)
+      // Create a context-aware prompt for OpenAI with improved data analysis instructions
+      let analysisPrompt = message;
+      
+      // If we have enriched context from the selection, add it to the prompt
+      if (enrichedContext) {
+        analysisPrompt = `${message}\n\n${enrichedContext}`;
+      }
+      
+      // Skip all the direct counting/analysis approaches and go straight to OpenAI with enriched context
+      console.log("Using OpenAI as primary analysis engine with enriched context");
+      
+      // Log the full prompt in development for debugging
+      console.log("Sending to OpenAI:", analysisPrompt.length, "characters");
+      
+      // Always use OpenAI's analysis as the primary engine
+      const response = await analyzeData(analysisPrompt);
+      
+      if (response && response.success) {
+        const content = response.analysis || response.content || "I've analyzed your data but couldn't find a specific answer.";
+        
+        // For debugging
+        console.log("OpenAI response successful");
+        
+        updateLastMessage({ 
+          id: aiMessageId,
+          content: content,
+          isThinking: false
+        });
+        setProcessingAction(false);
+      } else {
+        updateLastMessage({ 
+          id: aiMessageId,
+          content: `I'm sorry, but I encountered an error analyzing your data: ${response?.error || 'Unknown error'}`,
+          isThinking: false,
+          isError: true
+        });
+        setProcessingAction(false);
+      }
     } catch (error) {
       console.error("Error in chat processing:", error);
       updateLastMessage({
