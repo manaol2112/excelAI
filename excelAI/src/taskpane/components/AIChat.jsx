@@ -855,7 +855,7 @@ export default function AIChat() {
   // Local state
   const [inputValue, setInputValue] = useState('');
   const [processingAction, setProcessingAction] = useState(false);
-  const [mode, setMode] = useState(AI_MODES.ASK);
+  const [mode, setMode] = useState(AI_MODES.AGENT); // Changed from AI_MODES.ASK to AI_MODES.AGENT
   const [actionText, setActionText] = useState('');
   const [excelDataLoaded, setExcelDataLoaded] = useState(false);
   const [suggestionsVisible, setSuggestionsVisible] = useState(true);
@@ -1799,7 +1799,33 @@ Please implement this change using best practices for Office.js:
           }
 
           // Format the message to show to the user before execution
-          let executionMessage = responseContent.replace(/```javascript([\s\S]*?)```/, '```javascript\n// Code will be executed automatically\n```');
+          // Fix the issue with "Here is the executable Office.js code:" without showing the code
+          let executionMessage = responseContent;
+          
+          // If the response has text followed by a code block with markers
+          if (codeMatch) {
+            // Keep the original markdown code formatting to ensure the code is displayed
+            executionMessage = responseContent.replace(/```javascript([\s\S]*?)```/, 
+              "```javascript\n" + codeToExecute + "\n```");
+          } else {
+            // If there are no code block markers but we found code, add them
+            executionMessage = responseContent.replace(/Here is the executable Office\.js code:/, 
+              "Here is the executable Office.js code:\n\n```javascript\n" + codeToExecute + "\n```");
+          }
+          
+          // If we still don't have code properly formatted in the message, ensure it's there
+          if (!executionMessage.includes("```javascript")) {
+            const codeBlockStart = "Here is the executable Office.js code:";
+            if (executionMessage.includes(codeBlockStart)) {
+              executionMessage = executionMessage.replace(
+                codeBlockStart,
+                codeBlockStart + "\n\n```javascript\n" + codeToExecute + "\n```"
+              );
+            } else {
+              // If the specific text isn't found, just append the code
+              executionMessage += "\n\n```javascript\n" + codeToExecute + "\n```";
+            }
+          }
           
           // Update the message to show what will be done
           updateLastMessage({
@@ -1827,11 +1853,40 @@ Please implement this change using best practices for Office.js:
                   timestamp: new Date().toISOString()
                 });
                 
-                // Update the createAnalysisWorksheet function to ensure we always include the data
+                // Update Agent Mode execution block to improve data collection
                 if (!executionResult.message || !executionResult.message.includes("worksheet")) {
                   try {
-                    // Always include the data if we have it
-                    const dataToInclude = selectionData?.values || [];
+                    // Ensure we have the latest data after execution
+                    let dataToInclude = [];
+                    
+                    console.log("Preparing data for agent mode analysis worksheet");
+                    
+                    // First try to refresh to get the updated data after the agent made changes
+                    const refreshResult = await refreshSelectionData();
+                    
+                    if (refreshResult && selectionData && Array.isArray(selectionData.values)) {
+                      console.log("Using refreshed selection data for agent analysis worksheet:", selectionData.values.length, "rows");
+                      dataToInclude = selectionData.values;
+                    } else if (selectionData && Array.isArray(selectionData.values)) {
+                      console.log("Using existing selection data for agent analysis worksheet:", selectionData.values.length, "rows");
+                      dataToInclude = selectionData.values;
+                    } else {
+                      // Try to get data directly as a last resort
+                      console.log("No existing data, trying direct Excel getData call");
+                      try {
+                        const directResult = await excelService.getData(currentSelection.address, {
+                          includeAllRows: true,
+                          preserveTypes: true
+                        });
+                        
+                        if (directResult && directResult.success && Array.isArray(directResult.data)) {
+                          console.log("Got data directly from Excel for agent worksheet:", directResult.data.length, "rows");
+                          dataToInclude = directResult.data;
+                        }
+                      } catch (err) {
+                        console.error("Error getting data directly for agent worksheet:", err);
+                      }
+                    }
                     
                     // Create an analysis worksheet with the execution details
                     const sheetResult = await createAnalysisWorksheet(
@@ -1940,8 +1995,56 @@ Please implement this change using best practices for Office.js:
         
         // Create an analysis worksheet with the results
         try {
-          // Always include the data if we have it
-          const dataToInclude = selectionData?.values || [];
+          // Ensure we have the latest data
+          let dataToInclude = [];
+          
+          // Log data status for debugging
+          console.log("Creating analysis worksheet with data:", 
+                      selectionData ? `selectionData exists with ${selectionData.values?.length || 0} rows` : "No selectionData");
+          
+          // First try to use the selection data that was already collected
+          if (selectionData && Array.isArray(selectionData.values) && selectionData.values.length > 0) {
+            console.log("Using existing selection data for analysis worksheet");
+            dataToInclude = selectionData.values;
+          } 
+          // If no data, try to refresh the selection data
+          else if (useSelection && currentSelection && currentSelection.address) {
+            console.log("No data found, attempting to refresh selection data");
+            try {
+              // Get fresh data from Excel
+              const refreshResult = await refreshSelectionData();
+              
+              if (refreshResult && selectionData && Array.isArray(selectionData.values)) {
+                console.log("Successfully refreshed data, found", selectionData.values.length, "rows");
+                dataToInclude = selectionData.values;
+              } else {
+                console.log("Refresh attempt failed to get data");
+              }
+            } catch (err) {
+              console.error("Error refreshing data:", err);
+            }
+            
+            // If we still don't have data, try getting it directly
+            if (dataToInclude.length === 0) {
+              console.log("Still no data, trying direct Excel getData call");
+              try {
+                const directResult = await excelService.getData(currentSelection.address, {
+                  includeAllRows: true,
+                  preserveTypes: true
+                });
+                
+                if (directResult && directResult.success && Array.isArray(directResult.data)) {
+                  console.log("Got data directly from Excel:", directResult.data.length, "rows");
+                  dataToInclude = directResult.data;
+                }
+              } catch (err) {
+                console.error("Error getting data directly:", err);
+              }
+            }
+          }
+          
+          // Final check if we have data
+          console.log("Final data for analysis worksheet:", dataToInclude.length, "rows");
           
           const sheetResult = await createAnalysisWorksheet(
             "Excel AI Analysis Results",
@@ -2553,11 +2656,11 @@ Please implement this change using best practices for Office.js:
   const refreshSelectionData = async () => {
     if (!useSelection || !currentSelection || !currentSelection.address) {
       console.log("No active selection to refresh");
-      return;
+      return false;
     }
     
     try {
-      console.log("Refreshing selection data from Excel");
+      console.log("Refreshing selection data from Excel for", currentSelection.address);
       const directRangeResult = await excelService.getData(currentSelection.address, {
         includeAllRows: true,
         preserveTypes: true
@@ -2579,7 +2682,7 @@ Please implement this change using best practices for Office.js:
         // Clear any existing OpenAI data to ensure it will be regenerated
         setOpenAIJsonData(null);
         
-        console.log("Selection data refreshed successfully");
+        console.log("Selection data refreshed successfully with", directRangeResult.data.length, "rows");
         return true;
       } else {
         console.error("Failed to refresh range data:", directRangeResult?.error || "Unknown error");
@@ -2641,6 +2744,10 @@ Please implement this change using best practices for Office.js:
     try {
       console.log("Creating analysis worksheet");
       
+      // Debug log the data being used
+      console.log("Analysis worksheet data:", 
+                  Array.isArray(data) ? `${data.length} rows x ${data[0]?.length || 0} columns` : "No data available");
+      
       // Generate a unique name for the worksheet with more entropy to avoid conflicts
       const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").substring(0, 14) + "_" + Math.random().toString(36).substring(2, 7);
       const sheetName = `Analysis_${timestamp}`;
@@ -2650,6 +2757,8 @@ Please implement this change using best practices for Office.js:
       let dataDescription = "No data was available for this analysis";
       
       if (Array.isArray(data) && data.length > 0) {
+        console.log("Preparing data for worksheet display:", data.length, "rows available");
+        
         // By default, we'll include all data but limit rows if it's too large
         if (data.length > 20) {
           // For large datasets, include headers and a sample of rows
@@ -2662,11 +2771,21 @@ Please implement this change using best practices for Office.js:
             : data.slice(0, 10);
             
           dataDescription = `Sample of ${data.length} rows from the analyzed data (showing first 10 rows)`;
+          console.log("Using sample data:", relevantData.length, "rows for large dataset");
         } else {
           // For smaller datasets, include everything
           relevantData = data;
           dataDescription = `Complete dataset used for analysis (${data.length} rows)`;
+          console.log("Using complete dataset:", relevantData.length, "rows");
         }
+      } else {
+        console.log("No data available for worksheet");
+      }
+      
+      // Special handling for empty data
+      if (!Array.isArray(relevantData) || relevantData.length === 0) {
+        console.log("Creating worksheet with empty data notification");
+        relevantData = [["No data available"]];
       }
       
       // Create the code to generate the worksheet
