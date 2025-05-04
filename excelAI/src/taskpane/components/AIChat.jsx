@@ -1695,7 +1695,7 @@ export default function AIChat() {
         }
         
         try {
-          // Create a simple string prompt that includes all necessary context
+          // Modify the Agent Mode prompt to use timestamped sheet names
           const completePrompt = `
 I need Office.js code to modify an Excel spreadsheet based on the following request:
 
@@ -1714,15 +1714,32 @@ IMPORTANT REQUIREMENTS:
 5. DO NOT reference cells outside the selected range
 6. Focus on implementing ONE clear modification per request
 7. IMPORTANT: First explain what your code will do, then provide the code
+8. AFTER modifying the data, your code MUST create a new worksheet that documents:
+   - The original request
+   - What changes were made
+   - A summary of the results
+   - A copy of the modified data (ALWAYS include the original and modified data)
+   - Any formulas or calculations that were used
 
 The code should follow this structure:
 \`\`\`javascript
 await Excel.run(async (context) => {
   try {
-    // Your implementation code here
+    // Your implementation code here for the main task
     // ...
     await context.sync();
-    return { success: true, message: "Description of what was completed" };
+    
+    // Then create documentation worksheet with a unique timestamped name
+    // IMPORTANT: Use a unique name with timestamp so multiple analyses don't conflict
+    const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").substring(0, 14);
+    const documentationSheet = context.workbook.worksheets.add("Analysis_" + timestamp);
+    
+    // Add the documentation content
+    // MUST include both original and modified data
+    // ...
+    
+    await context.sync();
+    return { success: true, message: "Description of what was completed and the name of the documentation worksheet" };
   } catch (error) {
     console.error("Error:", error);
     return { success: false, error: error.message };
@@ -1735,6 +1752,8 @@ Please implement this change using best practices for Office.js:
 - Use Excel.NumberFormat enums for formatting when available
 - Include proper await context.sync() calls after loading properties
 - For conditional formatting, use the proper Excel.ConditionalFormatType enums
+- Format the documentation worksheet professionally with proper headers, formatting, and explanations
+- ALWAYS include the data that was analyzed or modified in the documentation worksheet
 `;
 
           console.log("Sending simple string prompt for Agent Mode");
@@ -1808,6 +1827,36 @@ Please implement this change using best practices for Office.js:
                   timestamp: new Date().toISOString()
                 });
                 
+                // Update the createAnalysisWorksheet function to ensure we always include the data
+                if (!executionResult.message || !executionResult.message.includes("worksheet")) {
+                  try {
+                    // Always include the data if we have it
+                    const dataToInclude = selectionData?.values || [];
+                    
+                    // Create an analysis worksheet with the execution details
+                    const sheetResult = await createAnalysisWorksheet(
+                      "Excel AI Agent Actions",
+                      message,
+                      responseContent, // Use the full response including code
+                      dataToInclude,
+                      true, // Code always contains "formulas" (the code itself)
+                      codeToExecute // Include the executed code
+                    );
+                    
+                    if (sheetResult.success) {
+                      // Add a message about the created worksheet
+                      addMessage({
+                        id: generateId(),
+                        role: 'assistant',
+                        content: `📊 I've created a worksheet named "${sheetResult.sheetName}" with detailed documentation of the changes made and the data used.`,
+                        timestamp: new Date().toISOString()
+                      });
+                    }
+                  } catch (err) {
+                    console.error("Error creating agent documentation worksheet:", err);
+                  }
+                }
+                
                 // Refresh the selection data to show the updated values
                 await refreshSelectionData();
               } else {
@@ -1877,11 +1926,45 @@ Please implement this change using best practices for Office.js:
         // For debugging
         console.log("OpenAI response successful");
         
+        // Update the message immediately so the user sees the response
         updateLastMessage({ 
           id: aiMessageId,
           content: content,
           isThinking: false
         });
+        
+        // Extract any formula mentioned in the response
+        const formulaMatch = content.match(/=\s*([A-Z]+\s*\([^)]+\))/g);
+        const hasFormulas = formulaMatch && formulaMatch.length > 0;
+        const formulaText = hasFormulas ? "Formulas detected: " + formulaMatch.join(", ") : "";
+        
+        // Create an analysis worksheet with the results
+        try {
+          // Always include the data if we have it
+          const dataToInclude = selectionData?.values || [];
+          
+          const sheetResult = await createAnalysisWorksheet(
+            "Excel AI Analysis Results",
+            message,
+            content,
+            dataToInclude,
+            hasFormulas,
+            formulaText
+          );
+          
+          if (sheetResult.success) {
+            // Add a message about the created worksheet
+            addMessage({
+              id: generateId(),
+              role: 'assistant',
+              content: `📊 I've created a worksheet named "${sheetResult.sheetName}" with the analysis results and data for your reference.`,
+              timestamp: new Date().toISOString()
+            });
+          }
+        } catch (err) {
+          console.error("Error creating analysis worksheet:", err);
+        }
+        
         setProcessingAction(false);
       } else {
         updateLastMessage({ 
@@ -2541,6 +2624,222 @@ Please implement this change using best practices for Office.js:
       setTimeout(() => setStatusMessage(null), 3000);
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * Creates an analysis worksheet to display AI results
+   * @param {string} analysisTitle - Title for the analysis
+   * @param {string} userQuery - The user's original question
+   * @param {string} aiResponse - The AI's response text
+   * @param {Array} [data] - The data that was analyzed (optional)
+   * @param {boolean} [hasFormulas] - Whether the analysis includes formulas
+   * @param {string} [formulaText] - Text of the formulas used (optional)
+   * @returns {Promise<Object>} Result of the operation
+   */
+  const createAnalysisWorksheet = async (analysisTitle, userQuery, aiResponse, data, hasFormulas, formulaText) => {
+    try {
+      console.log("Creating analysis worksheet");
+      
+      // Generate a unique name for the worksheet with more entropy to avoid conflicts
+      const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").substring(0, 14) + "_" + Math.random().toString(36).substring(2, 7);
+      const sheetName = `Analysis_${timestamp}`;
+      
+      // Try to intelligently filter the data to only show relevant information
+      let relevantData = [];
+      let dataDescription = "No data was available for this analysis";
+      
+      if (Array.isArray(data) && data.length > 0) {
+        // By default, we'll include all data but limit rows if it's too large
+        if (data.length > 20) {
+          // For large datasets, include headers and a sample of rows
+          const hasHeaders = data.length > 1;
+          const headers = hasHeaders ? data[0] : null;
+          
+          // Take first 10 rows of data (plus headers if they exist)
+          relevantData = hasHeaders 
+            ? [headers, ...data.slice(1, 11)] 
+            : data.slice(0, 10);
+            
+          dataDescription = `Sample of ${data.length} rows from the analyzed data (showing first 10 rows)`;
+        } else {
+          // For smaller datasets, include everything
+          relevantData = data;
+          dataDescription = `Complete dataset used for analysis (${data.length} rows)`;
+        }
+      }
+      
+      // Create the code to generate the worksheet
+      const worksheetCode = `
+        return (async () => {
+          try {
+            await Excel.run(async (context) => {
+              // Add a new worksheet
+              const newSheet = context.workbook.worksheets.add("${sheetName}");
+              newSheet.activate();
+              
+              // Set up ranges for the main sections
+              const titleRange = newSheet.getRange("A1:E1");
+              
+              // SECTION 1: ORIGINAL QUESTION
+              const questionHeaderRange = newSheet.getRange("A3:E3");
+              const questionRange = newSheet.getRange("A4:E5");
+              
+              // SECTION 2: AI RESPONSE
+              const responseHeaderRange = newSheet.getRange("A7:E7");
+              const responseRange = newSheet.getRange("A8:E14");
+              
+              // Format the main title
+              titleRange.merge();
+              titleRange.values = [["${analysisTitle || 'Excel AI Analysis'}"]]
+              titleRange.format.font.size = 16;
+              titleRange.format.font.bold = true;
+              titleRange.format.fill.color = "#4472C4";
+              titleRange.format.font.color = "white";
+              titleRange.format.horizontalAlignment = "Center";
+              
+              // SECTION 1: Original Question
+              questionHeaderRange.merge();
+              questionHeaderRange.values = [["Original Question"]];
+              questionHeaderRange.format.font.bold = true;
+              questionHeaderRange.format.fill.color = "#D9E1F2";
+              
+              questionRange.merge();
+              questionRange.values = [["${userQuery.replace(/"/g, '""')}"]]
+              questionRange.format.wrapText = true;
+              
+              // SECTION 2: AI Response
+              responseHeaderRange.merge();
+              responseHeaderRange.values = [["Analysis Result"]];
+              responseHeaderRange.format.font.bold = true;
+              responseHeaderRange.format.fill.color = "#D9E1F2";
+              
+              responseRange.merge();
+              responseRange.values = [["${aiResponse.replace(/"/g, '""').replace(/\\n/g, '\\\\n')}"]]
+              responseRange.format.wrapText = true;
+              
+              // SECTION 3: Formulas (if any)
+              let currentRow = 16;
+              
+              if (${hasFormulas}) {
+                const formulaHeaderRange = newSheet.getRange("A" + currentRow + ":E" + currentRow);
+                formulaHeaderRange.merge();
+                formulaHeaderRange.values = [["Formulas Used"]];
+                formulaHeaderRange.format.font.bold = true;
+                formulaHeaderRange.format.fill.color = "#D9E1F2";
+                
+                const formulaRange = newSheet.getRange("A" + (currentRow+1) + ":E" + (currentRow+3));
+                formulaRange.merge();
+                formulaRange.values = [["${(formulaText || '').replace(/"/g, '""').replace(/\\n/g, '\\\\n')}"]]
+                formulaRange.format.wrapText = true;
+                
+                currentRow += 5; // Move down for the next section
+              }
+              
+              // SECTION 4: Relevant Data
+              const dataHeaderRange = newSheet.getRange("A" + currentRow + ":E" + currentRow);
+              dataHeaderRange.merge();
+              dataHeaderRange.values = [["Relevant Data"]];
+              dataHeaderRange.format.font.bold = true;
+              dataHeaderRange.format.fill.color = "#D9E1F2";
+              
+              currentRow++;
+              
+              // Add data description
+              const dataDescriptionRange = newSheet.getRange("A" + currentRow + ":E" + currentRow);
+              dataDescriptionRange.merge();
+              dataDescriptionRange.values = [["${dataDescription.replace(/"/g, '""')}"]]
+              dataDescriptionRange.format.italic = true;
+              dataDescriptionRange.format.font.color = "#666666";
+              
+              currentRow++;
+              
+              if (${Array.isArray(relevantData) && relevantData.length > 0}) {
+                // Determine if we have headers
+                const hasHeaders = ${relevantData && relevantData.length > 1};
+                const startRow = currentRow;
+                
+                // Determine column width based on data
+                const numColumns = ${relevantData && relevantData[0] ? relevantData[0].length : 1};
+                
+                // If we have headers, add them in the first row
+                if (hasHeaders) {
+                  for (let c = 0; c < numColumns; c++) {
+                    const headerCell = newSheet.getCell(startRow, c);
+                    headerCell.values = [["${relevantData && relevantData[0] ? (relevantData[0][c] || '') : ''}"]]
+                    headerCell.format.font.bold = true;
+                    headerCell.format.fill.color = "#D9E1F2";
+                  }
+                  
+                  // Add the data starting in the next row
+                  for (let r = 1; r < ${relevantData ? relevantData.length : 0}; r++) {
+                    for (let c = 0; c < numColumns; c++) {
+                      const cell = newSheet.getCell(startRow + r, c);
+                      cell.values = [["${relevantData ? (relevantData[r] && relevantData[r][c] !== undefined ? relevantData[r][c] : '') : ''}"]]
+                    }
+                  }
+                  
+                  currentRow += ${relevantData ? relevantData.length : 0};
+                } else {
+                  // No headers, just add the data starting in the current row
+                  for (let r = 0; r < ${relevantData ? relevantData.length : 0}; r++) {
+                    for (let c = 0; c < numColumns; c++) {
+                      const cell = newSheet.getCell(startRow + r, c);
+                      cell.values = [["${relevantData ? (relevantData[r] && relevantData[r][c] !== undefined ? relevantData[r][c] : '') : ''}"]]
+                    }
+                  }
+                  
+                  currentRow += ${relevantData ? relevantData.length : 0};
+                }
+                
+                // Auto-fit columns for better readability
+                for (let c = 0; c < numColumns; c++) {
+                  const column = newSheet.getColumn(c);
+                  column.format.autofitColumns();
+                }
+              } else {
+                // No data available, show a message
+                const noDataCell = newSheet.getCell(currentRow, 0);
+                noDataCell.values = [["No relevant data was available for this analysis"]];
+                noDataCell.format.font.italic = true;
+                noDataCell.format.font.color = "#666666";
+                
+                currentRow += 2;
+              }
+              
+              // Add a timestamp footer (at the end, regardless of where we are)
+              currentRow += 2;
+              const timestampRange = newSheet.getRange("A" + currentRow + ":E" + currentRow);
+              timestampRange.merge();
+              timestampRange.values = [["Analysis created on ${new Date().toLocaleString()}"]]
+              timestampRange.format.font.italic = true;
+              timestampRange.format.font.color = "#666666";
+              timestampRange.format.horizontalAlignment = "Right";
+              
+              // Adjust column widths
+              newSheet.getColumn(0).width = 120;
+              for (let i = 1; i < 5; i++) {
+                newSheet.getColumn(i).width = 60;
+              }
+              
+              await context.sync();
+            });
+            
+            return { success: true, sheetName: "${sheetName}" };
+          } catch (error) {
+            console.error("Error creating analysis worksheet:", error);
+            return { success: false, error: error.message };
+          }
+        })();
+      `;
+      
+      // Execute the code to create the worksheet
+      const result = await excelService.execute(worksheetCode);
+      console.log("Analysis worksheet creation result:", result);
+      return result;
+    } catch (error) {
+      console.error("Error creating analysis worksheet:", error);
+      return { success: false, error: error.message };
     }
   };
 
