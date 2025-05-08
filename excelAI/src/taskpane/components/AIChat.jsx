@@ -1529,6 +1529,9 @@ export default function AIChat() {
                   // Verify we've created the expected number of JSON objects
                   console.log(`JSON data conversion complete: ${jsonData.length} rows created from ${useValues.length - jsonStartRow} source rows`);
                   
+                  // *** NEW DEBUG LOG: Verify jsonData length before stringify ***
+                  console.log("[DEBUG] jsonData array length BEFORE stringify:", jsonData.length);
+                  
                   // If rows are missing, log a warning
                   if (jsonData.length < useValues.length - jsonStartRow) {
                     console.warn(`Missing rows in JSON conversion: expected ${useValues.length - jsonStartRow}, got ${jsonData.length}`);
@@ -1961,16 +1964,49 @@ Please implement this change using best practices for Office.js:
       // Create a context-aware prompt for OpenAI with improved data analysis instructions
       let analysisPrompt = message;
       
-      // If we have enriched context from the selection, add it to the prompt
+      // If we have enriched context from the selection, restructure the prompt for clarity
       if (enrichedContext) {
-        analysisPrompt = `${message}\n\n${enrichedContext}`;
+        // Adopt a more structured prompt format similar to Agent Mode
+        // Corrected template literal formatting for strict mode
+        analysisPrompt = 
+`Analyze the provided Excel data context to answer the user's question.
+
+USER QUESTION:
+${message}
+
+EXCEL DATA CONTEXT:
+${enrichedContext}
+
+ANALYSIS REQUIREMENTS:
+1. You MUST analyze the ENTIRE dataset provided in the 'EXCEL DATA CONTEXT' section above.
+2. **Iterate through EVERY object** in the JSON array provided in the data context.
+3. Perform calculations, summaries, and analysis based on ALL matching objects/rows in the JSON data.
+4. Do NOT stop after finding the first matching record; ensure all records are processed.
+5. Provide a clear and concise answer to the 'USER QUESTION' based on your full analysis of all relevant data points.
+`;
+
+        // *** START DEBUG LOGS ***
+        console.log("[DEBUG] Enriched Context Length:", enrichedContext.length);
+        // Log a sample of the JSON data within the context to check if it looks complete
+        const jsonSampleMatch = enrichedContext.match(/```json([\s\S]*?)```/);
+        if (jsonSampleMatch && jsonSampleMatch[1]) {
+          const jsonDataSample = jsonSampleMatch[1].trim();
+          console.log("[DEBUG] Sample of JSON in Context (first/last 200 chars):", 
+            jsonDataSample.substring(0, 200) + "..." + jsonDataSample.substring(jsonDataSample.length - 200));
+          } else {
+          console.log("[DEBUG] JSON data block not found in context for sampling.");
+          }
+        // *** END DEBUG LOGS ***
+
       }
       
       // Skip all the direct counting/analysis approaches and go straight to OpenAI with enriched context
-      console.log("Using OpenAI as primary analysis engine with enriched context");
+      console.log("Using OpenAI as primary analysis engine with structured prompt");
       
       // Log the full prompt in development for debugging
-      console.log("Sending to OpenAI:", analysisPrompt.length, "characters");
+      console.log("Sending structured prompt to OpenAI:", analysisPrompt.length, "characters");
+      // *** DEBUG LOG ***
+      // console.log("Full prompt being sent:\n", analysisPrompt); // Uncomment to see the full prompt if needed
       
       // Always use OpenAI's analysis as the primary engine
       const response = await analyzeData(analysisPrompt);
